@@ -9,6 +9,7 @@ default_params=(
     "--generation_latent_do_sample_by=dropout"
     "--generation_dropout_p=0.2"
     "--use_wandb=False"
+    "--num_latents=8"
 )
 mkdir -p latent-data/coconut
 # training data

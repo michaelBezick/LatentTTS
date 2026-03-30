@@ -243,6 +243,7 @@ class DataGenerator:
         self.main_batch_size = self.batch_size // self.n_samples
         if self.debug:
             self.main_batch_size //= 16
+        self.main_batch_size = max(1, self.main_batch_size)
         self.dataloader = DataLoader(
             self.dataset, batch_size=self.main_batch_size, collate_fn=self.collator, shuffle=False
         )
