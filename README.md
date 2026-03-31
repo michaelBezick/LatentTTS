@@ -169,6 +169,14 @@ Related helpers:
 - `./slurm/zaratan/submit_annotation.sh` to launch latent-data generation
 - `./slurm/zaratan/submit_best_of_n_eval.sh` to evaluate best-of-N reranking with the communication-aware RM
 
+Interactive testing helpers:
+
+- `./slurm/zaratan/interactive_train.sh` to request an interactive allocation with the same training resources
+- `./slurm/zaratan/interactive_annotation.sh` to test the annotation environment interactively
+- `./slurm/zaratan/interactive_best_of_n_eval.sh` to test reranking/eval commands before submitting batch jobs
+
+Set `OPEN_SHELL_ONLY=1` if you want the allocation to drop you into an interactive shell without auto-running the command.
+
 These wrappers intentionally keep Zaratan-specific settings parameterized, so you can adapt account, partition, QoS, conda environment, and GPU request without editing the scripts themselves.
 
 > [!NOTE]
