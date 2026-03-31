@@ -2,37 +2,15 @@
 
 <div align="center">
 
-<h1>Parallel Test-Time Scaling for Latent Reasoning Models</h1>
-
-</div>
-
-<div align="center">
-
-<!-- Paper Link -->
-
-<a href="https://arxiv.org/abs/2510.07745">
-    <img src="https://img.shields.io/badge/Paper-arXiv-b31b1b?style=for-the-badge&logo=arxiv" alt="Paper" height="18">
-  </a>
-
-<!-- HuggingFace Models -->
-
-<a href="https://huggingface.co/collections/ModalityDance/latent-tts">
-    <img src="https://img.shields.io/badge/HuggingFace-Models-fcc21b?style=for-the-badge&logo=huggingface&logoColor=white" alt="HF Models"   height="18">
-  </a>
-
-<!-- HuggingFace Papers -->
-
-<a href="https://huggingface.co/papers/2510.07745">
-    <img src="https://img.shields.io/badge/HuggingFace-Papers-fcc21b?style=for-the-badge&logo=huggingface&logoColor=white" alt="HF Papers"   height="18">
-  </a>
-
-<img src="./assets/main_no_caption.png" alt="Project Logo" width="800">
+<h1>Latent Thought Communication for Parallel Latent Reasoning Models</h1>
 
 </div>
 
 ---
 
-This is the implementation for the paper [**Parallel Test-Time Scaling for Latent Reasoning Models**](https://huggingface.co/papers/2510.07745), enabling efficient exploration of continuous thought spaces through stochastic sampling and reward model-guided search. It provides implementations of two stochastic sampling methods (Monte Carlo Dropout and Additive Gaussian Noise) and a LatentRM for best-of-N and beam search strategies. This repository includes training scripts, evaluation pipelines, and inference code for multiple backbone models including COCONUT, CODI, and CoLaR, evaluated on benchmarks such as GSM8K Test, GSM8K Hard, and MultiArith.
+This repository is a **communication-focused fork** of the implementation for [**Parallel Test-Time Scaling for Latent Reasoning Models**](https://huggingface.co/papers/2510.07745). The original codebase explores multiple latent reasoning trajectories with stochastic sampling and reward-model-guided search. This fork keeps that foundation, but its main goal is to study **latent thought communication** between parallel trajectories.
+
+The current first experiment is **scorer-side soft attention**: generate multiple latent trajectories as usual, then allow those trajectories to interact through a communication module before the latent reward model ranks them. The repository still supports the original stochastic sampling and reward-guided best-of-N / beam-search pipeline for COCONUT, CODI, and CoLaR on benchmarks such as GSM8K Test, GSM8K Hard, and MultiArith.
 
 ### 🪐 Key Features
 
@@ -46,11 +24,17 @@ This is the implementation for the paper [**Parallel Test-Time Scaling for Laten
 > 
 > Simply use `model.generate()` with batch inputs just like any other Transformers model!
 
-🧭 **Stochastic Sampling Methods**
-Two complementary approaches for exploring continuous thought spaces: Monte Carlo Dropout and Additive Gaussian Noise, enabling diverse reasoning path generation during inference.
+🤝 **Latent Thought Communication**
+This fork adds configurable communication modules for parallel latent trajectories, starting with **soft attention** between trajectories before reward-model scoring.
 
-🌌 **Latent Reward Model (LatentRM)**
-A trained reward model that guides best-of-N selection and beam search, significantly improving reasoning accuracy by identifying high-quality latent reasoning paths.
+🧭 **Stochastic Sampling Methods**
+Monte Carlo Dropout and Additive Gaussian Noise are still supported for generating diverse latent reasoning paths.
+
+🌌 **Communication-Aware Latent Reward Model**
+The LatentRM can now score trajectories either independently or after cross-trajectory communication, enabling experiments on whether interacting latent paths improve reranking.
+
+🖥️ **Cluster-Friendly Experimentation**
+Reusable Zaratan SLURM submit scripts are included for data annotation, multi-GPU training, and best-of-N evaluation.
 
 
 ## 📑 Table of Contents <span id="table-of-contents"></span>
@@ -112,68 +96,6 @@ huggingface-cli download ModalityDance/latent-tts-colar --local-dir checkpoints/
 huggingface-cli download ModalityDance/latent-tts-rm --local-dir checkpoints/latentRM
 ```
 
-**Simple Generation Example**
-
-Here's a minimal example of using `.generate()` with a latent reasoning model:
-
-```python
-from transformers import AutoTokenizer
-from src.generation_mixin import LatentGenerationMixin, LatentGenerationConfig
-from src.paths import MODELS
-
-# Load tokenizer
-model_type = "coconut"  # or "codi", "colar"
-model_id = MODELS[model_type]["id"]
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-# Get latent token IDs
-latent_id = tokenizer.convert_tokens_to_ids("<|latent|>")
-start_id = tokenizer.convert_tokens_to_ids("<|start-latent|>")
-end_id = tokenizer.convert_tokens_to_ids("<|end-latent|>")
-
-# Create model class with generation mixin
-class LatentModel(MODELS[model_type]["class"], LatentGenerationMixin):
-    def __init__(self, config):
-        super().__init__(config)
-
-# Load model
-model = LatentModel.from_pretrained(
-    model_id,
-    latent_id=latent_id,
-    latent_start_id=start_id,
-    latent_end_id=end_id,
-    device_map="auto",
-)
-
-# Prepare input
-question = "What is 2 + 2?\n<|start-latent|>"
-inputs = tokenizer(question, return_tensors="pt").to(model.device)
-
-# Configure generation
-generation_config = LatentGenerationConfig(
-    max_new_tokens=512,
-    latent_length=6,
-    latent_do_sample=True,
-    latent_do_sample_by="dropout",  # or "noise"
-    dropout_p=0.1,
-    pad_token_id=tokenizer.pad_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-)
-
-# Generate
-output = model.generate(
-    **inputs,
-    generation_config=generation_config,
-    num_return_sequences=1,
-)
-
-# Decode result
-result = tokenizer.decode(output[0], skip_special_tokens=True)
-print(result)
-```
-
 #### **Data Annotation**
 
 First, run the data annotation process to prepare training data for LatentRM:
@@ -194,13 +116,14 @@ This script will:
 
 #### **Training Configuration**
 
-Configure your training parameters in the `training_args/` directory. The main configuration file is `train_coconut.yaml`:
+Configure your training parameters in the `training_args/` directory. For the communication experiment, the main configuration file is `train_coconut_soft_attention.yaml`:
 
 ```yaml
-run_name: "run1"
+run_name: "coconut-soft-attention"
 metric_for_best_model: "test_n_64_recall_at_1"
-output_dir: "/workspace/model-out/"
-# ... other parameters
+output_dir: "outputs/coconut-soft-attention"
+loss_type: "ce"
+communication_type: "attention"
 ```
 
 #### **Model Training**
@@ -209,13 +132,13 @@ Navigate to your project directory and launch training:
 
 ```bash
 cd your/path/to/latent-tts
-accelerate launch -m src.train training_args/train_coconut.yaml
+accelerate launch -m src.train training_args/train_coconut_soft_attention.yaml
 ```
 
 The training process will:
 
 - Load the annotated data from the previous step
-- Train the latentRM with the specified configuration
+- Train the communication-aware LatentRM with the specified configuration
 - Save checkpoints and evaluation results
 
 ##### **Zaratan SLURM Submission**
@@ -309,15 +232,16 @@ you can organize in your own way as long as it meets the goals above!!!
 
 ## ✨ How It Works <span id="how-it-works"></span>
 
-🪐 **LatentTTS** is built around a modular research pipeline for **parallel test-time scaling of latent reasoning models**, where each component corresponds to a well-defined stage in the overall method.  
-The system separates input processing, stochastic latent reasoning, and reward-guided selection into independent modules, allowing controlled experimentation and analysis.  
-This design enables flexible replacement of individual components (e.g., switching between dropout and noise sampling, or different backbone models) without affecting the rest of the pipeline.
+🪐 **LatentTTS (communication fork)** is built around a modular pipeline for **parallel latent reasoning with interacting trajectories**.  
+The original repository focused on generating diverse latent reasoning paths and selecting among them. This fork keeps that structure, but emphasizes research on whether parallel latent paths should **communicate** before selection rather than remain independent.  
+The code is organized so communication can be introduced incrementally, with the current implementation focused on scorer-side interaction and future work aimed at generation-time interaction.
 
 At a high level, the workflow proceeds as follows:
 
-1. **Input Processing and Tokenization** — Raw problem inputs (e.g., math word problems) are tokenized and prepared with special latent tokens (`<|latent|>`, `<|start-latent|>`, `<|end-latent|>`). The model processes these inputs through its embedding layer, setting up the context for latent reasoning generation.  
-2. **Stochastic Latent Reasoning Generation** — The model generates multiple diverse reasoning paths in the continuous latent space using one of two stochastic sampling methods: **Monte Carlo Dropout** (randomly dropping activations during forward passes to create variability) or **Additive Gaussian Noise** (injecting noise directly into latent embeddings). Each sampling method explores different regions of the latent thought space, producing varied reasoning trajectories for the same input.  
-3. **Reward-Guided Selection and Output Generation** — The trained **Latent Reward Model (LatentRM)** evaluates the quality of each generated reasoning path by scoring latent embeddings. Based on these scores, the system applies either **best-of-N selection** (choosing the top-N highest-scoring paths) or **beam search** (maintaining multiple high-quality candidates during generation) to identify the most promising reasoning paths. The final answer is extracted from the selected path, significantly improving accuracy through parallel exploration and intelligent selection.
+1. **Input Processing and Tokenization** — Raw problem inputs are tokenized and prepared with special latent tokens (`<|latent|>`, `<|start-latent|>`, `<|end-latent|>`), creating the scaffold for latent reasoning.  
+2. **Parallel Latent Trajectory Generation** — The base model generates multiple reasoning paths in continuous latent space using **Monte Carlo Dropout** or **Additive Gaussian Noise**. This preserves the original repository's ability to explore diverse thought trajectories in parallel.  
+3. **Latent Thought Communication** — In this fork's first experiment, grouped trajectories for the same prompt are passed through a communication module before reward-model scoring. The current focus is **soft attention**, but the communication layer is configurable so other mechanisms can be tested later.  
+4. **Communication-Aware Reward-Guided Selection** — The **Latent Reward Model (LatentRM)** scores each trajectory after optional communication. Those scores are then used for **best-of-N** reranking and can be compared against the baseline independent-trajectory scorer. Generation-time communication remains a future extension.
 
 
 
@@ -332,6 +256,7 @@ latent-tts/
 │   │   ├── coconut.py     # COCONUT model
 │   │   ├── codi.py        # CODI model
 │   │   ├── colar.py       # CoLaR model
+│   │   ├── communication.py # Trajectory communication modules
 │   │   ├── gpt2.py        # GPT-2 base models
 │   │   ├── llama.py       # LLaMA base models
 │   │   ├── loss.py        # Loss functions
@@ -341,13 +266,16 @@ latent-tts/
 │   ├── trainer.py         # Training utilities
 │   ├── infer_gpt2.py      # GPT-2 inference
 │   ├── infer_llama.py     # LLaMA inference
-│   ├── infer_gpt2_rm.py   # latentRM-based inference
+│   ├── infer_gpt2_rm.py   # Communication-aware latentRM inference
 │   ├── dataset.py         # Dataset handling
 │   ├── generation_mixin.py # Generation utilities
 │   ├── paths.py           # Path utilities
 │   └── utils.py           # Utility functions
+├── slurm/
+│   └── zaratan/           # Zaratan cluster submission scripts
 ├── training_args/         # Training configurations
-│   └── train_coconut.yaml # COCONUT training config
+│   ├── train_coconut.yaml # Baseline COCONUT training config
+│   └── train_coconut_soft_attention.yaml # Communication-focused training config
 ├── data/                  # Dataset files
 ├── checkpoints/           # Model checkpoints
 │   └── latentRM/          # latentRM checkpoint
@@ -361,14 +289,14 @@ latent-tts/
 
 ## 🤝 Join the Community <span id="community"></span>
 
-We welcome researchers, developers, and enthusiasts to join the **LatentTTS** community. You can participate by reporting issues, contributing features, or sharing feedback to help us improve and grow the project.
+We welcome researchers and engineers interested in **latent thought communication**, latent-space reasoning, and test-time scaling. If you are exploring interacting latent trajectories, communication-aware reranking, or generation-time communication mechanisms, this fork is intended to be an easy place to experiment and contribute.
 
 > [!TIP]
 > 📄 Explore the paper on [**Hugging Face Papers**](https://huggingface.co/papers/2510.07745) — it includes community discussions, citation tools, and related resources. If you find our work insightful, please consider giving it an **upvote** to support further research!
 
 ## 🌱 **Acknowledgements** <span id="acknowledgements"></span>
 
-We would like to thank the contributors, open-source projects, and research communities whose work made **LatentTTS** possible. This project builds upon ideas, tools, and datasets developed by the broader machine learning and reasoning research ecosystem. We also acknowledge helpful discussions and support from the members of **Modality Dance Group** and the open-source community.
+We would like to thank the contributors, open-source projects, and research communities whose work made **LatentTTS** possible. This fork builds directly on that foundation and extends it toward latent thought communication. We also acknowledge helpful discussions and support from the members of **Modality Dance Group** and the open-source community.
 
 This project is licensed under the **MIT License**. Please refer to the LICENSE file for more details.
 
