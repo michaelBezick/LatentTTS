@@ -20,6 +20,6 @@ class COCONUTGPT2Config(GPT2Config):
 class COCONUTGPT2(GPT2LMHeadModel):
     config_class = COCONUTGPT2Config
 
-    def __init__(self, config, communication_module):
+    def __init__(self, config, communication_module=None):
         super().__init__(config)
         self.communication_module = communication_module
