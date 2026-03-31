@@ -1,19 +1,15 @@
-run_name: "run1"
+run_name: "coconut-soft-attention"
 metric_for_best_model: "test_n_64_recall_at_1"
-output_dir: "/workspace/model-out/"
+output_dir: "outputs/coconut-soft-attention"
 loss_type: "ce"
 communication_type: "attention"
 communication_attention_heads: 4
 
-
 train_dataset: "latent-data/coconut/train"
 
-valid_dataset: 
+valid_dataset:
   "test_n_64": "latent-data/coconut/valid-64"
   "test_n_4": "latent-data/coconut/valid-4"
-
-
-
 
 seed: 42
 per_device_train_batch_size: 2048

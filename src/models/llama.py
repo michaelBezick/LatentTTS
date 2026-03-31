@@ -7,6 +7,8 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.cache_utils import Cache
 
+from src.models.communication import apply_communication_to_latent_embeddings
+
 
 class LatentLlamaConfig(LlamaConfig):
     def __init__(
@@ -41,6 +43,7 @@ class COCONUTLlamaForTokenClassification(LlamaPreTrainedModel):
         self.dropout = nn.Dropout(classifier_dropout)
 
         self.classifier = nn.Linear(config.hidden_size, 1 if config.loss_type == "bce" else 2)
+        self.communication_module = None
 
         if config.latent_hidden_size != -1:
             self.projecter = nn.Linear(config.latent_hidden_size, config.hidden_size)
@@ -67,6 +70,7 @@ class COCONUTLlamaForTokenClassification(LlamaPreTrainedModel):
         head_mask: Optional[torch.FloatTensor] = None,
         latent_embeds: Optional[List[torch.FloatTensor]] = None,
         labels: Optional[List[torch.LongTensor]] = None,
+        trajectory_group_size: Optional[int] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -93,6 +97,13 @@ class COCONUTLlamaForTokenClassification(LlamaPreTrainedModel):
                     _end = latent_indices.max() + 1
                     inputs_embeds[i, _start:_end] = latent_embed
                     i += 1
+            inputs_embeds = apply_communication_to_latent_embeddings(
+                inputs_embeds=inputs_embeds,
+                input_ids=input_ids,
+                latent_token_id=self.config.latent_id,
+                communication_module=self.communication_module,
+                trajectory_group_size=trajectory_group_size,
+            )
 
         transformer_outputs = self.model(
             past_key_values=past_key_values,

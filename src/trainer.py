@@ -17,10 +17,12 @@ from src.dataset import (
     CachedPickleDatasetV2,
     DataCollatorForLatentRM,
     DataCollatorForContrastiveLatentRM,
+    DataCollatorForGroupedLatentRM,
 )
 from src.models.gpt2 import COCONUTGPT2ForTokenClassification, CODIGPT2ForTokenClassification, CODIGPT2Config
 from src.models.llama import COCONUTLlamaForTokenClassification
 from src.models.loss import MaskedBCEWithLogitsLoss, MaskedCrossEntropyLoss
+from src.models.communication import build_communication_module
 
 if is_peft_available():
     from peft import PeftConfig, get_peft_model, prepare_model_for_kbit_training
@@ -128,6 +130,18 @@ class LatentRMConfig(TrainingArguments):
         default="bce",
         metadata={"help": "The loss type to use for training."},
     )
+    communication_type: Literal["none", "mean", "attention", "router"] = field(
+        default="none",
+        metadata={"help": "Cross-trajectory communication module to apply before RM scoring."},
+    )
+    communication_attention_heads: int = field(
+        default=4,
+        metadata={"help": "Number of attention heads for soft-attention communication."},
+    )
+    communication_topk: int = field(
+        default=2,
+        metadata={"help": "Top-k routes to aggregate when using router communication."},
+    )
 
 
 
@@ -182,7 +196,7 @@ class LatentRMTrainer(Trainer):
                 data_dir=dataset,
                 verbose=False,
                 include_gt=True,
-                get_single_sample=True,
+                get_single_sample=not (args.loss_type == "ce" and args.communication_type != "none"),
             )
             for name, dataset in args.valid_dataset.items()
         }
@@ -225,6 +239,14 @@ class LatentRMTrainer(Trainer):
                 model.resize_token_embeddings(len(processing_class))
         else:
             raise ValueError(f"Model family {args.model_family} not supported.")
+
+        if args.communication_type != "none":
+            model.communication_module = build_communication_module(
+                communication_type=args.communication_type,
+                d_model=model.config.hidden_size,
+                n_heads=args.communication_attention_heads,
+                topk=args.communication_topk,
+            )
 
         if not is_peft_available() and peft_config is not None:
             raise ValueError(
@@ -271,9 +293,15 @@ class LatentRMTrainer(Trainer):
                 else None
             ),
         )
-        self.eval_data_collator = DataCollatorForLatentRM(
+        eval_collator_class = (
+            DataCollatorForGroupedLatentRM
+            if args.loss_type == "ce" and args.communication_type != "none"
+            else DataCollatorForLatentRM
+        )
+        self.eval_data_collator = eval_collator_class(
             processing_class,
             latent_token_id=latent_id,
+            latent_end_id=end_id,
             remove_pad_token=True,
             generator_tokenizer=(
                 AutoTokenizer.from_pretrained(args.generator_model_id)
@@ -321,6 +349,14 @@ class LatentRMTrainer(Trainer):
             else:
                 n_samples = self._under_eval_dataset.n_samples
             return self.loss_fct(logits, labels, n_samples=n_samples)
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        trajectory_group_size = inputs.pop("trajectory_group_size", None)
+        if trajectory_group_size is not None:
+            trajectory_group_size = int(trajectory_group_size.item())
+        outputs = model(**inputs, trajectory_group_size=trajectory_group_size)
+        loss = self.compute_loss_func(outputs, inputs["labels"], num_items_in_batch=num_items_in_batch)
+        return (loss, outputs) if return_outputs else loss
 
     def train(self):
         super().train()

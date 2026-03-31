@@ -218,6 +218,36 @@ The training process will:
 - Train the latentRM with the specified configuration
 - Save checkpoints and evaluation results
 
+##### **Zaratan SLURM Submission**
+
+For UMD Zaratan, this repo now includes reusable submit wrappers in `slurm/zaratan/`.
+
+Training the scorer-side soft-attention experiment on a single 4xA100 node:
+
+```bash
+ACCOUNT=<your_account> \
+PARTITION=<your_partition> \
+QOS=<your_qos> \
+CONDA_ENV=latenttts \
+NUM_GPUS=4 \
+./slurm/zaratan/submit_train.sh training_args/train_coconut_soft_attention.yaml
+```
+
+Useful overrides:
+
+- `GPU_TYPE=a100` or `GPU_TYPE=""` if your Zaratan partition expects a generic GPU request
+- `TIME_LIMIT=24:00:00`
+- `MEMORY=240G`
+- `MODULES_TO_LOAD="cuda/12.1"`
+- `EXTRA_ACCELERATE_ARGS="--mixed_precision bf16"`
+
+Related helpers:
+
+- `./slurm/zaratan/submit_annotation.sh` to launch latent-data generation
+- `./slurm/zaratan/submit_best_of_n_eval.sh` to evaluate best-of-N reranking with the communication-aware RM
+
+These wrappers intentionally keep Zaratan-specific settings parameterized, so you can adapt account, partition, QoS, conda environment, and GPU request without editing the scripts themselves.
+
 > [!NOTE]
 > Pre-trained checkpoint is available at [HuggingFace](https://huggingface.co/ModalityDance/latent-tts-rm).
 

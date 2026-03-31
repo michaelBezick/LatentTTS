@@ -13,6 +13,7 @@ from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
 from .paths import MODELS
 from .models.gpt2 import COCONUTGPT2ForTokenClassification
 from .models.llama import COCONUTLlamaForTokenClassification
+from .models.communication import build_communication_module
 from .utils import set_seed, InferenceCollator
 
 
@@ -33,6 +34,9 @@ def main(
     seed: int = 200,
     sort_by_len: bool = True,
     progress_bar: bool = True,
+    communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    communication_attention_heads: int = 4,
+    communication_topk: int = 2,
 ):
     new_line_after_input = generator_type == "coconut"
     if prm_mode == "beam_search":
@@ -132,6 +136,13 @@ def main(
                 else (torch.float16 if model_dtype == "fp16" else None)
             ),
         )
+    if communication_type != "none":
+        prm.communication_module = build_communication_module(
+            communication_type=communication_type,
+            d_model=prm.config.hidden_size,
+            n_heads=communication_attention_heads,
+            topk=communication_topk,
+        ).to(prm.device)
     prm.eval()
     model.eval()
     dataset = datasets.Dataset.from_json(data_path)
@@ -199,6 +210,7 @@ def main(
                 input_ids=inputs["input_ids"].to(prm.device),
                 attention_mask=inputs["attention_mask"].to(prm.device),
                 latent_embeds=output.latent_thoughts.to(prm.device),
+                trajectory_group_size=num_return_sequences,
                 return_dict=True,
             ).logits.squeeze(
                 -1

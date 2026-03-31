@@ -47,6 +47,9 @@ class LatentGenerateDecoderOnlyOutput(GenerateDecoderOnlyOutput):
 
 
 class LatentGenerationConfig(GenerationConfig):
+    num_latent_paths: int | None = None
+    communication_type: Literal["none", "mean", "attention", "router"] = "none"
+    communication_every: int = 1
     latent_length: int | None = None
     max_latent_length: int | None = None
     latent_do_sample: bool = False
@@ -592,8 +595,30 @@ class LatentGenerationMixin(GenerationMixin):
                 torch.where(next_tokens == self.config.latent_id, 0, next_tokens)
             )
             if latent_sequences.any():
+
                 last_layer_hidden_states = outputs.hidden_states[-1]
-                new_token_embedding = last_layer_hidden_states[:, -1, :]  # (B, D)
+                new_token_embedding = last_layer_hidden_states[:, -1, :]   # [B*N, D]
+
+                # communication interface
+                if generation_config.communication_type != "none":
+                    num_paths = generation_config.num_latent_paths or generation_config.num_return_sequences
+                    flat_BN, d = new_token_embedding.shape
+                    assert flat_BN % num_paths == 0
+                    base_B = flat_BN // num_paths
+
+                    grouped = new_token_embedding.view(base_B, num_paths, d)
+                    grouped_alive = latent_sequences.view(base_B, num_paths)
+
+                    comm = getattr(self, "communication_module", None)
+
+                    grouped = comm(
+                        grouped,
+                        alive_mask=grouped_alive,
+                        step_idx=cur_len,
+                    )
+
+                    new_token_embedding = grouped.view(flat_BN, d)
+
                 next_embeds[latent_sequences] = new_token_embedding[latent_sequences]
 
                 if generation_config.latent_do_sample_by == "noise":

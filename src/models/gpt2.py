@@ -8,6 +8,7 @@ from transformers.cache_utils import Cache
 
 from src.models.coconut import COCONUTGPT2Config
 from src.models.codi import CODIGPT2Config
+from src.models.communication import apply_communication_to_latent_embeddings
 
 
 class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
@@ -25,6 +26,7 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
         self.dropout = nn.Dropout(classifier_dropout)
 
         self.classifier = nn.Linear(config.hidden_size, 1)
+        self.communication_module = None
 
         # Model parallel
         self.model_parallel = False
@@ -44,6 +46,7 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
         head_mask: Optional[torch.FloatTensor] = None,
         latent_embeds: Optional[List[torch.FloatTensor]] = None,
         labels: Optional[List[torch.LongTensor]] = None,
+        trajectory_group_size: Optional[int] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -71,6 +74,13 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
                     _end = latent_indices.max() + 1
                     inputs_embeds[i, _start:_end] = latent_embed
                     i += 1
+            inputs_embeds = apply_communication_to_latent_embeddings(
+                inputs_embeds=inputs_embeds,
+                input_ids=input_ids,
+                latent_token_id=self.config.latent_id,
+                communication_module=self.communication_module,
+                trajectory_group_size=trajectory_group_size,
+            )
 
         transformer_outputs = self.transformer(
             past_key_values=past_key_values,
@@ -116,6 +126,7 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
         self.dropout = nn.Dropout(classifier_dropout)
 
         self.classifier = nn.Linear(config.hidden_size, 1)
+        self.communication_module = None
 
         if config.projector:
             self.projector = nn.Sequential(
@@ -144,6 +155,7 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
         head_mask: Optional[torch.FloatTensor] = None,
         latent_embeds: Optional[List[torch.FloatTensor]] = None,
         labels: Optional[List[torch.LongTensor]] = None,
+        trajectory_group_size: Optional[int] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -171,6 +183,13 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
                     _end = latent_indices.max() + 1
                     inputs_embeds[i, _start:_end] = latent_embed
                     i += 1
+            inputs_embeds = apply_communication_to_latent_embeddings(
+                inputs_embeds=inputs_embeds,
+                input_ids=input_ids,
+                latent_token_id=self.config.latent_id,
+                communication_module=self.communication_module,
+                trajectory_group_size=trajectory_group_size,
+            )
 
         transformer_outputs = self.transformer(
             past_key_values=past_key_values,

@@ -180,33 +180,35 @@ class DataCollatorForLatentRM(DataCollatorForTokenClassification):
     postfix: str = 6 * "<|latent|>" + "<|end-latent|>"
     encoded_postfix: List[int] = field(default_factory=lambda: 6 * [50259] + [50258])
 
+    def _prepare_input_ids(self, input_ids):
+        if self.generator_tokenizer is not None:
+            inputs = self.generator_tokenizer.decode(input_ids, skip_special_tokens=True)
+
+            if self.postfix not in inputs:
+                inputs = inputs + self.postfix
+            splited = inputs.split("\n")
+            question = splited[0]
+            answer = "\n".join(splited[1:])
+            input_ids = self.tokenizer.apply_chat_template(
+                [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": answer},
+                ],
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+
+        elif self.remove_pad_token:
+            input_ids = input_ids[input_ids != self.tokenizer.pad_token_id]
+
+        if self.latent_token_id not in input_ids:
+            input_ids = torch.cat([input_ids, torch.tensor(self.encoded_postfix)])
+        return input_ids
+
     def torch_call(self, features):
 
         for feature in features:
-            input_ids = feature["input_ids"]
-            if self.generator_tokenizer is not None:
-                inputs = self.generator_tokenizer.decode(input_ids, skip_special_tokens=True)
-
-                if self.postfix not in inputs:
-                    inputs = inputs + self.postfix
-                splited = inputs.split("\n")
-                question = splited[0]
-                answer = "\n".join(splited[1:])
-                input_ids = self.tokenizer.apply_chat_template(
-                    [
-                        {"role": "user", "content": question},
-                        {"role": "assistant", "content": answer},
-                    ],
-                    tokenize=True,
-                    add_generation_prompt=True,
-                )
-
-            elif self.remove_pad_token:
-                input_ids = input_ids[input_ids != self.tokenizer.pad_token_id]
-
-            if self.latent_token_id not in input_ids:
-                input_ids = torch.cat([input_ids, torch.tensor(self.encoded_postfix)])
-            feature["input_ids"] = input_ids
+            feature["input_ids"] = self._prepare_input_ids(feature["input_ids"])
 
         feature_names = ["input_ids"]
         no_labels_features = [
@@ -225,16 +227,15 @@ class DataCollatorForLatentRM(DataCollatorForTokenClassification):
 
         labels = torch.full_like(batch["input_ids"], -100, dtype=batch["latent_embeds"][0].dtype)
         for i in range(len(batch["latent_embeds"])):
-
             latent_indices = batch["input_ids"][i] == self.latent_token_id
-            estimations = features[i]["estimations"]
+            estimations = features[i]["estimations"].clone()
             num_latent_steps = latent_indices.long().sum()
 
-        if "corrects" in features[i]:
-            corrects = features[i]["corrects"]
-            # find the largest (last) non -100 index
-            last_non_100_idx = (estimations != -100).nonzero()[-1]
-            estimations[last_non_100_idx] = corrects.float()
+            if "corrects" in features[i]:
+                corrects = features[i]["corrects"]
+                # find the largest (last) non -100 index
+                last_non_100_idx = (estimations != -100).nonzero()[-1]
+                estimations[last_non_100_idx] = corrects.float()
 
             labels[i, latent_indices] = estimations[:num_latent_steps]
 
@@ -248,6 +249,9 @@ class DataCollatorForContrastiveLatentRM(DataCollatorForLatentRM):
 
     def torch_call(self, features):
         all_input_ids = []
+        grouped_latent_embeds = []
+        grouped_estimations = []
+        grouped_corrects = []
         for feature in features:
             input_ids = feature["input_ids"]
             if self.generator_tokenizer is not None:
@@ -268,14 +272,17 @@ class DataCollatorForContrastiveLatentRM(DataCollatorForLatentRM):
                         tokenize=True,
                         add_generation_prompt=True,
                     )
-                modified_inputs.append(_input_ids)  # List[List[int]]
+                    modified_inputs.append(torch.tensor(_input_ids))  # List[Tensor]
             else:
-                modified_inputs = [input_ids[i] for i in range(len(input_ids))]
+                modified_inputs = [self._prepare_input_ids(input_ids[i]) for i in range(len(input_ids))]
             for i in range(len(modified_inputs)):
                 if self.latent_token_id not in modified_inputs[i]:
                     modified_inputs[i] = torch.cat([modified_inputs[i], torch.tensor(self.encoded_postfix)])
 
             all_input_ids.extend(modified_inputs)
+            grouped_latent_embeds.extend([latent_embed for latent_embed in feature["latent_embeds"]])
+            grouped_estimations.append(feature["estimations"])
+            grouped_corrects.append(feature.get("corrects"))
 
         n_samples = input_ids.shape[0]
 
@@ -289,18 +296,19 @@ class DataCollatorForContrastiveLatentRM(DataCollatorForLatentRM):
             return_tensors="pt",
         )
 
-        batch["latent_embeds"] = [feature["latent_embeds"] for feature in features]
+        batch["latent_embeds"] = grouped_latent_embeds
+        batch["trajectory_group_size"] = torch.tensor(n_samples, dtype=torch.long)
 
         labels = torch.full_like(batch["input_ids"], -100, dtype=batch["latent_embeds"][0].dtype)
-        for i in range(len(batch["latent_embeds"])):
+        for i in range(len(features)):
             cur_input_ids = batch["input_ids"][i * n_samples : (i + 1) * n_samples]
 
             latent_indices = cur_input_ids[0] == self.latent_token_id
-            estimations = features[i]["estimations"]
+            estimations = grouped_estimations[i].clone()
             num_latent_steps = latent_indices.long().sum()
 
-            if "corrects" in features[i]:
-                corrects = features[i]["corrects"]
+            if grouped_corrects[i] is not None:
+                corrects = grouped_corrects[i]
                 # find the largest (last) non -100 index
                 for j in range(n_samples):
                     last_non_100_idx = (estimations[j] != -100).nonzero()[-1]
@@ -311,3 +319,8 @@ class DataCollatorForContrastiveLatentRM(DataCollatorForLatentRM):
         batch["labels"] = labels
 
         return batch
+
+
+@dataclass
+class DataCollatorForGroupedLatentRM(DataCollatorForContrastiveLatentRM):
+    pass
