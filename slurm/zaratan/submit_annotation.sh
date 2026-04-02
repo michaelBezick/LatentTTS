@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 SBATCH_SCRIPT="${SCRIPT_DIR}/run_annotation.sbatch"
+LOG_DIR="${REPO_ROOT}/logs/slurm"
 
 ANNOTATION_SCRIPT="${ANNOTATION_SCRIPT:-run_annotation.sh}"
 
@@ -28,13 +29,18 @@ export CONDA_ENV
 export VENV_ACTIVATE
 export MODULES_TO_LOAD
 
+mkdir -p "${LOG_DIR}"
+
 sbatch_args=(
     "--job-name=${JOB_NAME}"
     "--nodes=1"
     "--ntasks=1"
+    "--chdir=${REPO_ROOT}"
     "--cpus-per-task=${CPUS_PER_TASK}"
     "--time=${TIME_LIMIT}"
     "--mem=${MEMORY}"
+    "--output=${LOG_DIR}/%x-%j.out"
+    "--error=${LOG_DIR}/%x-%j.err"
     "--export=ALL"
 )
 

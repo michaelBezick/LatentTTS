@@ -31,10 +31,10 @@ mkdir -p "${REPO_ROOT}/logs/slurm"
 cd "${REPO_ROOT}"
 
 if [[ -n "${MODULES_TO_LOAD}" ]]; then
+    if [[ -f /etc/profile ]]; then
+        source_with_nounset_disabled /etc/profile || true
+    fi
     if command -v module >/dev/null 2>&1; then
-        if [[ -f /etc/profile ]]; then
-            source_with_nounset_disabled /etc/profile || true
-        fi
         for module_name in ${MODULES_TO_LOAD}; do
             module load "${module_name}"
         done

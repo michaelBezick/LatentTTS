@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 SBATCH_SCRIPT="${SCRIPT_DIR}/run_python_module.sbatch"
+LOG_DIR="${REPO_ROOT}/logs/slurm"
 
 PRM_ID="${PRM_ID:-checkpoints/latentRM}"
 DATA_PATH="${DATA_PATH:-data/gsm_valid.json}"
@@ -35,13 +36,18 @@ export VENV_ACTIVATE
 export MODULES_TO_LOAD
 export USE_ACCELERATE=0
 
+mkdir -p "${LOG_DIR}"
+
 sbatch_args=(
     "--job-name=${JOB_NAME}"
     "--nodes=1"
     "--ntasks=1"
+    "--chdir=${REPO_ROOT}"
     "--cpus-per-task=${CPUS_PER_TASK}"
     "--time=${TIME_LIMIT}"
     "--mem=${MEMORY}"
+    "--output=${LOG_DIR}/%x-%j.out"
+    "--error=${LOG_DIR}/%x-%j.err"
     "--export=ALL"
 )
 
