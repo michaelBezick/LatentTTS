@@ -208,3 +208,4 @@ __marimo__/
 checkpoints/
 latent-data/
 .github/
+resume.sh
