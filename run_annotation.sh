@@ -16,7 +16,7 @@ mkdir -p latent-data/coconut
 # training data
 accelerate launch --main_process_port 0 --num_processes 1 -m src.annotate_data \
     ${default_params[@]} \
-    --n_samples_per_step=64 \
+    --n_samples_per_step=16 \
     --n_samples=8 \
     --data_path=data/gsm_train.json \
     --name="train"
