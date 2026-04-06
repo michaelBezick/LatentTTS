@@ -14,18 +14,18 @@ default_params=(
 )
 mkdir -p latent-data/coconut
 # training data
-accelerate launch --main_process_port 0 --num_processes 1 -m src.annotate_data \
+accelerate launch --mixed_precision=bf16 --main_process_port 0 --num_processes 1 -m src.annotate_data \
     ${default_params[@]} \
     --n_samples_per_step=16 \
     --n_samples=8 \
     --data_path=data/gsm_train.json \
-    --name="train"
+    --name="train"\
 
 
 # validation data for evaluation
 Ns=(4 64)
 for N in ${Ns[@]}; do
-    accelerate launch --main_process_port 0 --num_processes 1 -m src.annotate_data \
+    accelerate launch --mixed_precision=bf16 --main_process_port 0 --num_processes 1 -m src.annotate_data \
         ${default_params[@]} \
         --n_samples_per_step=0 \
         --n_samples=${N} \
