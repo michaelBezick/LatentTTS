@@ -20,12 +20,52 @@ class MeanBroadcastCommunication(BaseCommunication):
         return x + pooled
 
 class CrossPathAttentionCommunication(BaseCommunication):
+    """Cross-path attention communication module.
+
+    Design contract
+    ---------------
+    * **No causal mask** — attention is fully bidirectional (all-to-all across the N
+      trajectory paths).  No ``attn_mask`` or ``is_causal`` flag is passed to
+      ``nn.MultiheadAttention``, so every path can attend to every other path equally.
+
+    * **No positional encoding** — ``nn.MultiheadAttention`` applies Q/K/V linear
+      projections only; no positional bias is added here.  Moreover, all k paths process
+      the *same* input sequence at the *same* latent step, so any positional information
+      already embedded in the representations is identical across paths, keeping the
+      communication purely content-based.
+
+    * **Permutation equivariant** — standard multi-head self-attention is equivariant:
+      permuting the N input paths yields the same permutation of outputs.  This is the
+      correct property for a *communication* layer; each path's updated representation
+      reflects information from all others while the paths remain individually
+      distinguishable.
+
+    Permutation invariance of the *final selection* is achieved externally by the reward
+    model pipeline: path embeddings (enriched by this module) are scored independently
+    by the RM classifier, and the best path is selected via argmax — an operation that
+    is invariant to the order of its inputs.
+
+    ``alive_mask`` semantics
+    ------------------------
+    ``alive_mask`` is a boolean tensor of shape ``[B, N]`` indicating which of the N
+    paths are still active (generating).
+
+    * During **RM training**, ``alive_mask`` is ``None`` (or all-ones) — no masking,
+      all paths communicate freely.
+    * During **generation**, ``~alive_mask`` is passed as ``key_padding_mask`` so that
+      live paths do not attend to finished ones.  Finished paths may still attend to
+      live ones, but their communicated outputs are never written back (the caller guards
+      updates with the ``latent_sequences`` index mask).
+    """
+
     def __init__(self, d_model, n_heads=4):
         super().__init__()
         self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.ln = nn.LayerNorm(d_model)
 
     def forward(self, x, alive_mask=None, step_idx=None):
+        # Mask finished paths from the KEY dimension so live paths ignore them.
+        # No attn_mask is used — attention is fully bidirectional (non-causal).
         key_padding_mask = None if alive_mask is None else ~alive_mask
         y, _ = self.attn(x, x, x, key_padding_mask=key_padding_mask, need_weights=False)
         return self.ln(x + y)
@@ -78,6 +118,32 @@ def apply_communication_to_latent_embeddings(
     communication_module: BaseCommunication | None,
     trajectory_group_size: int | None,
 ) -> torch.Tensor:
+    """Apply cross-path communication to latent token embeddings before RM scoring.
+
+    For each latent step ``i``, the embeddings of all ``trajectory_group_size`` paths
+    at that step are gathered into a ``[num_groups, trajectory_group_size, hidden_size]``
+    tensor and passed through ``communication_module``.  Communication happens
+    *independently per step* — there is no cross-step attention here.
+
+    The communication module (e.g. ``CrossPathAttentionCommunication``) is *permutation
+    equivariant*: permuting the trajectory order permutes its outputs identically.
+    Permutation invariance of the *final selection* is achieved downstream by the RM
+    scoring + argmax pipeline.
+
+    Args:
+        inputs_embeds: Full sequence embeddings, shape ``[B, S, D]``.
+        input_ids: Token IDs corresponding to ``inputs_embeds``, shape ``[B, S]``.
+        latent_token_id: ID of the special ``<|latent|>`` token.
+        communication_module: Module implementing cross-path communication, or ``None``
+            to skip communication entirely.
+        trajectory_group_size: Number of trajectories per group (``N``).  The batch
+            size ``B`` must be divisible by this value.  ``None`` or ``≤1`` disables
+            communication.
+
+    Returns:
+        Updated ``inputs_embeds`` with latent token positions overwritten by their
+        communicated counterparts.  Non-latent positions are unchanged.
+    """
     if communication_module is None or trajectory_group_size is None or trajectory_group_size <= 1:
         return inputs_embeds
 

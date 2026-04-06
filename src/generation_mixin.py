@@ -599,7 +599,11 @@ class LatentGenerationMixin(GenerationMixin):
                 last_layer_hidden_states = outputs.hidden_states[-1]
                 new_token_embedding = last_layer_hidden_states[:, -1, :]   # [B*N, D]
 
-                # communication interface
+                # Cross-path communication at each latent step.
+                # The communication module is permutation *equivariant*: all k paths
+                # exchange information, but each path retains its own updated
+                # representation.  Permutation invariance of the final answer is
+                # achieved at the RM scoring stage (argmax over path scores).
                 if generation_config.communication_type != "none":
                     num_paths = generation_config.num_latent_paths or generation_config.num_return_sequences
                     flat_BN, d = new_token_embedding.shape
@@ -607,6 +611,8 @@ class LatentGenerationMixin(GenerationMixin):
                     base_B = flat_BN // num_paths
 
                     grouped = new_token_embedding.view(base_B, num_paths, d)
+                    # alive_mask marks paths still in the latent phase; finished paths
+                    # are masked from the KEY dimension so live paths ignore them.
                     grouped_alive = latent_sequences.view(base_B, num_paths)
 
                     comm = getattr(self, "communication_module", None)
