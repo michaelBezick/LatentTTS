@@ -18,7 +18,7 @@ MEMORY="${MEMORY:-120G}"
 # Sharding: set NUM_SHARDS > 1 to launch that many parallel annotation jobs,
 # each processing 1/NUM_SHARDS of the training dataset.
 # e.g.  NUM_SHARDS=4 ./submit_annotation.sh
-NUM_SHARDS="${NUM_SHARDS:-1}"
+NUM_SHARDS="${NUM_SHARDS:-4}"
 
 export REPO_ROOT
 
