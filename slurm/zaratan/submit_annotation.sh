@@ -9,25 +9,27 @@ LOG_DIR="${REPO_ROOT}/logs/slurm"
 ACCOUNT="${ACCOUNT:-}"
 PARTITION="${PARTITION:-}"
 QOS="${QOS:-}"
-TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-48:00:00}"
 NUM_GPUS="${NUM_GPUS:-1}"
 GPU_TYPE="${GPU_TYPE:-a100}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-16}"
 MEMORY="${MEMORY:-120G}"
+
+# Sharding: set NUM_SHARDS > 1 to launch that many parallel annotation jobs,
+# each processing 1/NUM_SHARDS of the training dataset.
+# e.g.  NUM_SHARDS=4 ./submit_annotation.sh
+NUM_SHARDS="${NUM_SHARDS:-1}"
 
 export REPO_ROOT
 
 mkdir -p "${LOG_DIR}"
 
 sbatch_args=(
-    "--job-name=latenttts-annotate"
     "--nodes=1" "--ntasks=1"
     "--chdir=${REPO_ROOT}"
     "--cpus-per-task=${CPUS_PER_TASK}"
     "--time=${TIME_LIMIT}"
     "--mem=${MEMORY}"
-    "--output=${LOG_DIR}/%x-%j.out"
-    "--error=${LOG_DIR}/%x-%j.err"
     "--export=ALL"
 )
 
@@ -40,5 +42,24 @@ else
     sbatch_args+=("--gres=gpu:${NUM_GPUS}")
 fi
 
-echo "Submitting annotation job..."
-sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/run_annotation.sbatch"
+if [[ "${NUM_SHARDS}" -gt 1 ]]; then
+    DATASET_PIECE=$(python3 -c "print(1/${NUM_SHARDS})")
+    echo "Submitting ${NUM_SHARDS} sharded annotation jobs (each covers ${DATASET_PIECE} of training data)..."
+    for (( IDX=0; IDX<NUM_SHARDS; IDX++ )); do
+        export DATASET_PIECE DATASET_INDICE="${IDX}"
+        sbatch \
+            "${sbatch_args[@]}" \
+            "--job-name=latenttts-annotate-shard${IDX}" \
+            "--output=${LOG_DIR}/latenttts-annotate-shard${IDX}-%j.out" \
+            "--error=${LOG_DIR}/latenttts-annotate-shard${IDX}-%j.err" \
+            "${SCRIPT_DIR}/run_annotation.sbatch"
+    done
+else
+    echo "Submitting annotation job..."
+    sbatch \
+        "${sbatch_args[@]}" \
+        "--job-name=latenttts-annotate" \
+        "--output=${LOG_DIR}/latenttts-annotate-%j.out" \
+        "--error=${LOG_DIR}/latenttts-annotate-%j.err" \
+        "${SCRIPT_DIR}/run_annotation.sbatch"
+fi
