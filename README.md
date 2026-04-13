@@ -214,7 +214,7 @@ This script will:
 
 - Test beam search with different `beam size` (1, 2, 4, 8)
 - Test Best-of-N with different `n_return_sequences` (1, 4, 16, 64)
-- Generate logs for different configurations
+- Generate logs for different configurations, including accuracy metrics plus timing summaries such as wall time, generation time, PRM scoring time, and throughput
 
 
 

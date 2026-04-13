@@ -1,4 +1,5 @@
 from collections import Counter
+import time
 from typing import Literal
 import torch
 import numpy as np
@@ -15,6 +16,15 @@ from .models.gpt2 import COCONUTGPT2ForTokenClassification
 from .models.llama import COCONUTLlamaForTokenClassification
 from .models.communication import build_communication_module
 from .utils import set_seed, InferenceCollator
+
+
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+
+def safe_divide(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator else 0.0
 
 
 @torch.no_grad()
@@ -173,11 +183,28 @@ def main(
     else:
         pbar = dataloader
 
+    timing_stats = {
+        "num_batches": 0,
+        "num_examples": 0,
+        "num_trajectories": 0,
+        "generation_time_sec": 0.0,
+        "prm_scoring_time_sec": 0.0,
+        "wall_time_sec": 0.0,
+    }
+
+    accelerator.wait_for_everyone()
+    synchronize_device(model.device)
+    run_start = time.perf_counter()
+
     for batch in pbar:
+        timing_stats["num_batches"] += 1
+        timing_stats["num_examples"] += len(batch["idx"])
         model_inputs = {
             k: v.to(model.device) for k, v in batch.items() if k in ["input_ids", "attention_mask"]
         }
 
+        synchronize_device(model.device)
+        generation_start = time.perf_counter()
         output = model.generate(
             **model_inputs,
             process_reward_model=prm if prm_mode == "beam_search" else None,
@@ -186,7 +213,10 @@ def main(
             return_dict_in_generate=True,
             use_cache=True,
         )
+        synchronize_device(model.device)
+        timing_stats["generation_time_sec"] += time.perf_counter() - generation_start
         text_output = processing_class.batch_decode(output.sequences, skip_special_tokens=True)
+        timing_stats["num_trajectories"] += len(text_output)
 
         prm_input_texts = []
         if prm_model_family == "llama":
@@ -206,6 +236,8 @@ def main(
         else:
             inputs = prm_processing_class(text_output, return_tensors="pt", padding=True)
         if prm_mode == "best_of_n":
+            synchronize_device(prm.device)
+            prm_scoring_start = time.perf_counter()
             prm_scores = prm(
                 input_ids=inputs["input_ids"].to(prm.device),
                 attention_mask=inputs["attention_mask"].to(prm.device),
@@ -215,6 +247,8 @@ def main(
             ).logits.squeeze(
                 -1
             )  # (B * num_samples, seq)
+            synchronize_device(prm.device)
+            timing_stats["prm_scoring_time_sec"] += time.perf_counter() - prm_scoring_start
 
             prm_scores = torch.where(
                 (inputs["input_ids"] == prm.config.latent_id).to(prm.device), prm_scores, 0
@@ -267,6 +301,8 @@ def main(
             pbar.set_postfix(_dict)
 
     accelerator.wait_for_everyone()
+    synchronize_device(model.device)
+    timing_stats["wall_time_sec"] = time.perf_counter() - run_start
     if accelerator.num_processes > 1:
         accuracies = accelerator.gather_for_metrics([accuracies], use_gather_object=True)
         accuracies = {idx: value for d in accuracies for idx, value in d.items()}
@@ -275,6 +311,9 @@ def main(
             all_corrects = {idx: value for d in all_corrects for idx, value in d.items()}
             voting_accuracies = accelerator.gather_for_metrics([voting_accuracies], use_gather_object=True)
             voting_accuracies = {idx: value for d in voting_accuracies for idx, value in d.items()}
+        timing_stats = accelerator.gather_for_metrics([timing_stats], use_gather_object=True)
+    else:
+        timing_stats = [timing_stats]
 
     if accelerator.is_main_process:
         print(f"SEED={seed}")
@@ -283,10 +322,36 @@ def main(
         print(f"Accuracy: {corrects.mean()*100:.4f}%")
         if prm_mode == "best_of_n":
             all_corrects = np.array(list(all_corrects.values()))
-            coverages = all_corrects.any(axis=-1).float().mean()
+            coverages = all_corrects.any(axis=-1).mean()
             voting_accuracies = np.array(list(voting_accuracies.values()))
             print(f"Coverage: {coverages*100:.4f}%")
             print(f"Voting Accuracy: {voting_accuracies.mean()*100:.4f}%")
+
+        total_examples = sum(stats["num_examples"] for stats in timing_stats)
+        total_trajectories = sum(stats["num_trajectories"] for stats in timing_stats)
+        max_num_batches = max(stats["num_batches"] for stats in timing_stats)
+        wall_time_sec = max(stats["wall_time_sec"] for stats in timing_stats)
+        generation_time_sec = max(stats["generation_time_sec"] for stats in timing_stats)
+        prm_scoring_time_sec = max(stats["prm_scoring_time_sec"] for stats in timing_stats)
+
+        print(f"Wall Time (s): {wall_time_sec:.4f}")
+        print(f"Generation Time (s): {generation_time_sec:.4f}")
+        print(
+            f"Avg Generation Time / Batch (s): {safe_divide(generation_time_sec, max_num_batches):.4f}"
+        )
+        print(f"Avg Wall Time / Example (ms): {safe_divide(wall_time_sec * 1000.0, total_examples):.4f}")
+        print(f"Example Throughput (examples/s): {safe_divide(total_examples, wall_time_sec):.4f}")
+        if total_trajectories > total_examples:
+            print(
+                f"Trajectory Throughput (trajectories/s): "
+                f"{safe_divide(total_trajectories, wall_time_sec):.4f}"
+            )
+        if prm_mode == "best_of_n":
+            print(f"PRM Scoring Time (s): {prm_scoring_time_sec:.4f}")
+            print(
+                f"Avg PRM Scoring Time / Batch (s): "
+                f"{safe_divide(prm_scoring_time_sec, max_num_batches):.4f}"
+            )
 
 
 if __name__ == "__main__":
