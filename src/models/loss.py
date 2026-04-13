@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 import torch.nn.functional as F
 
@@ -66,3 +67,57 @@ class MaskedCrossEntropyLoss(CrossEntropyLoss):
         loss = -(labels_filtered * log_probs).sum(dim=1).mean()
 
         return loss
+
+
+class DiversityPenaltyLoss(nn.Module):
+    """Penalizes low diversity across trajectories in the same group.
+
+    For each group of ``N`` trajectories, mean-pools the ``L`` post-communication
+    latent embeddings into a single vector per trajectory, L2-normalizes them, then
+    averages all ``N*(N-1)/2`` pairwise cosine similarities.  A higher value means
+    the trajectories are more similar → larger penalty → the communication module is
+    pushed to maintain diversity.
+
+    Args:
+        communicated_latent_embeds: Shape ``[B, L, D]`` where
+            ``B = num_groups * trajectory_group_size``.
+        trajectory_group_size: Number of trajectories per group (``N``).
+
+    Returns:
+        Scalar mean pairwise cosine similarity, range approximately ``[-1, 1]``.
+    """
+
+    def forward(
+        self,
+        communicated_latent_embeds: torch.Tensor,
+        trajectory_group_size: int,
+    ) -> torch.Tensor:
+        B, L, D = communicated_latent_embeds.shape
+        if B % trajectory_group_size != 0:
+            raise ValueError(
+                f"Batch size {B} is not divisible by trajectory_group_size={trajectory_group_size}."
+            )
+        num_groups = B // trajectory_group_size
+
+        # [B, D] — mean-pool over latent steps
+        pooled = communicated_latent_embeds.mean(dim=1)
+
+        # L2-normalize: [B, D]
+        normed = F.normalize(pooled, p=2, dim=-1)
+
+        # Reshape to [num_groups, N, D]
+        normed = normed.view(num_groups, trajectory_group_size, D)
+
+        # Pairwise cosine similarity via batch matrix multiply: [num_groups, N, N]
+        sim_matrix = torch.bmm(normed, normed.transpose(1, 2))
+
+        # Mask: upper triangle, excluding diagonal
+        N = trajectory_group_size
+        upper_mask = torch.triu(torch.ones(N, N, device=sim_matrix.device, dtype=torch.bool), diagonal=1)
+        n_pairs = upper_mask.sum().item()
+        if n_pairs == 0:
+            return sim_matrix.new_zeros(())
+
+        penalty = sim_matrix[:, upper_mask].mean()
+        return penalty
+

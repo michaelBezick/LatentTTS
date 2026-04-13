@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional, Union, Tuple, List
 
 import torch
@@ -5,6 +6,20 @@ import torch.nn as nn
 from transformers import GPT2PreTrainedModel, GPT2Config, GPT2Model
 from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.cache_utils import Cache
+
+
+@dataclass
+class LatentTrajectoryOutput(TokenClassifierOutput):
+    """TokenClassifierOutput extended with post-communication latent embeddings.
+
+    Attributes:
+        communicated_latent_embeds: Latent-token embeddings after the communication
+            module runs, shaped ``[B, L, D]`` where B is batch size, L is the number
+            of latent tokens per trajectory, and D is the hidden size.  ``None`` when
+            the communication module is absent or ``trajectory_group_size <= 1``.
+    """
+
+    communicated_latent_embeds: Optional[torch.FloatTensor] = None
 
 from src.models.coconut import COCONUTGPT2Config
 from src.models.codi import CODIGPT2Config
@@ -51,9 +66,10 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, TokenClassifierOutput]:
+    ) -> Union[Tuple, LatentTrajectoryOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        communicated_latent_embeds = None
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(
                 torch.where(input_ids == self.config.latent_id, 0, input_ids)
@@ -81,6 +97,11 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
                 communication_module=self.communication_module,
                 trajectory_group_size=trajectory_group_size,
             )
+            if trajectory_group_size is not None and trajectory_group_size > 1:
+                latent_mask = input_ids == self.config.latent_id  # [B, S]
+                B = inputs_embeds.shape[0]
+                L = latent_mask.sum(dim=-1)[0].item()
+                communicated_latent_embeds = inputs_embeds[latent_mask].reshape(B, L, -1)
 
         transformer_outputs = self.transformer(
             past_key_values=past_key_values,
@@ -103,11 +124,12 @@ class COCONUTGPT2ForTokenClassification(GPT2PreTrainedModel):
             output = (logits,) + transformer_outputs[2:]
             return output
 
-        return TokenClassifierOutput(
+        return LatentTrajectoryOutput(
             loss=None,
             logits=logits,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            communicated_latent_embeds=communicated_latent_embeds,
         )
 
 
@@ -160,9 +182,10 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, TokenClassifierOutput]:
+    ) -> Union[Tuple, LatentTrajectoryOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        communicated_latent_embeds = None
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(
                 torch.where(input_ids == self.config.latent_id, 0, input_ids)
@@ -190,6 +213,11 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
                 communication_module=self.communication_module,
                 trajectory_group_size=trajectory_group_size,
             )
+            if trajectory_group_size is not None and trajectory_group_size > 1:
+                latent_mask = input_ids == self.config.latent_id  # [B, S]
+                B = inputs_embeds.shape[0]
+                L = latent_mask.sum(dim=-1)[0].item()
+                communicated_latent_embeds = inputs_embeds[latent_mask].reshape(B, L, -1)
 
         transformer_outputs = self.transformer(
             past_key_values=past_key_values,
@@ -218,9 +246,10 @@ class CODIGPT2ForTokenClassification(GPT2PreTrainedModel):
             output = (logits,) + transformer_outputs[2:]
             return output
 
-        return TokenClassifierOutput(
+        return LatentTrajectoryOutput(
             loss=None,
             logits=logits,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            communicated_latent_embeds=communicated_latent_embeds,
         )

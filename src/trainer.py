@@ -21,7 +21,7 @@ from src.dataset import (
 )
 from src.models.gpt2 import COCONUTGPT2ForTokenClassification, CODIGPT2ForTokenClassification, CODIGPT2Config
 from src.models.llama import COCONUTLlamaForTokenClassification
-from src.models.loss import MaskedBCEWithLogitsLoss, MaskedCrossEntropyLoss
+from src.models.loss import MaskedBCEWithLogitsLoss, MaskedCrossEntropyLoss, DiversityPenaltyLoss
 from src.models.communication import build_communication_module
 
 if is_peft_available():
@@ -142,7 +142,15 @@ class LatentRMConfig(TrainingArguments):
         default=2,
         metadata={"help": "Top-k routes to aggregate when using router communication."},
     )
-
+    diversity_penalty_weight: float = field(
+        default=0.0,
+        metadata={
+            "help": "Weight for the trajectory diversity penalty loss.  When > 0, adds a term equal to "
+            "the mean pairwise cosine similarity of post-communication latent embeddings within each "
+            "trajectory group, scaled by this weight.  Only active for CE loss with grouped trajectories. "
+            "Set to 0.0 (default) to disable entirely."
+        },
+    )
 
 
 class LatentRMTrainer(Trainer):
@@ -276,6 +284,8 @@ class LatentRMTrainer(Trainer):
             self.loss_fct = MaskedBCEWithLogitsLoss()
         elif args.loss_type == "ce":
             self.loss_fct = MaskedCrossEntropyLoss()
+
+        self.diversity_loss_fct = DiversityPenaltyLoss() if args.diversity_penalty_weight > 0.0 else None
         ### set data collator ###
 
 
@@ -356,6 +366,16 @@ class LatentRMTrainer(Trainer):
             trajectory_group_size = int(trajectory_group_size.item())
         outputs = model(**inputs, trajectory_group_size=trajectory_group_size)
         loss = self.compute_loss_func(outputs, inputs["labels"], num_items_in_batch=num_items_in_batch)
+        if (
+            self.diversity_loss_fct is not None
+            and trajectory_group_size is not None
+            and trajectory_group_size > 1
+            and getattr(outputs, "communicated_latent_embeds", None) is not None
+        ):
+            diversity_loss = self.diversity_loss_fct(
+                outputs.communicated_latent_embeds, trajectory_group_size
+            )
+            loss = loss + self.args.diversity_penalty_weight * diversity_loss
         return (loss, outputs) if return_outputs else loss
 
     def train(self):
