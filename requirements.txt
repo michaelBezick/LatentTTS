@@ -9,5 +9,7 @@ tqdm==4.67.1
 rich==12.6.0
 wandb==0.22.2
 numpy==2.2.6
+pandas
+bitsandbytes
 peft==0.15.2
 
