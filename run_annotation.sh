@@ -11,7 +11,7 @@ NUM_PROCESSES="${NUM_PROCESSES:-1}"
 
 default_params=(
     "--save_path=latent-data/coconut"
-    "--batch_size=512"
+    "--batch_size=64"
     "--model_type=coconut"
     "--seed=42"
     "--generation_latent_do_sample_by=dropout"
