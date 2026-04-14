@@ -6,6 +6,7 @@ REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_train.sh}"
 TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_soft_attention.yaml}"
 NUM_GPUS="${NUM_GPUS:-4}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
+MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 
 mkdir -p "${REPO_ROOT}/logs/slurm"
 cd "${REPO_ROOT}"
@@ -28,5 +29,6 @@ srun accelerate launch \
     --num_processes "${NUM_GPUS}" \
     --num_machines 1 \
     --main_process_port "${MAIN_PROCESS_PORT}" \
+    --mixed_precision "${MIXED_PRECISION}" \
     -m src.train \
     "${TRAIN_CONFIG}"
