@@ -87,14 +87,14 @@ class COCONUTLlamaForTokenClassification(LlamaPreTrainedModel):
                 if not latent_embed.dim() == 2:
                     for j in range(latent_embed.shape[0]):
                         latent_indices = (input_ids[i] == self.config.latent_id).nonzero()
-                        _start = latent_indices.min()
                         _end = latent_indices.max() + 1
+                        _start = _end - latent_embed[j].shape[0]
                         inputs_embeds[i, _start:_end] = latent_embed[j]
                         i += 1
                 else:
                     latent_indices = (input_ids[i] == self.config.latent_id).nonzero()
-                    _start = latent_indices.min()
                     _end = latent_indices.max() + 1
+                    _start = _end - latent_embed.shape[0]
                     inputs_embeds[i, _start:_end] = latent_embed
                     i += 1
             inputs_embeds = apply_communication_to_latent_embeddings(
