@@ -13,7 +13,7 @@ valid_dataset:
 
 seed: 42
 per_device_train_batch_size: 32
-per_device_eval_batch_size: 32
+per_device_eval_batch_size: 1
 
 gradient_accumulation_steps: 8
 

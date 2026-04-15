@@ -23,6 +23,7 @@ conda activate latenttts
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 printf 'Running: accelerate launch -m src.train %s\n' "${TRAIN_CONFIG}"
 srun accelerate launch \
