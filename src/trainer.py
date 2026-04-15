@@ -85,7 +85,7 @@ class LatentRMConfig(TrainingArguments):
         metadata={"help": "Whether to load the best model at the end of training."},
     )
     report_to: str = field(
-        default="wandb",
+        default="none",
         metadata={"help": "The report to use for reporting the metrics."},
     )
     remove_unused_columns: bool = field(

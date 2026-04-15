@@ -209,3 +209,5 @@ checkpoints/
 latent-data/
 .github/
 resume.sh
+AGENTS.md
+logs/
