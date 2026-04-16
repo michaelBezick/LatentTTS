@@ -8,7 +8,13 @@ import torch
 import rich
 
 from torch.utils.data import DataLoader, Dataset
-from transformers import EvalPrediction, AutoTokenizer, Trainer, TrainingArguments, EarlyStoppingCallback
+from transformers import (
+    EvalPrediction,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    EarlyStoppingCallback,
+)
 from transformers.trainer_utils import EvalLoopOutput, seed_worker
 from transformers.utils import is_peft_available
 from trl.trainer.utils import disable_dropout_in_model
@@ -19,9 +25,17 @@ from src.dataset import (
     DataCollatorForContrastiveLatentRM,
     DataCollatorForGroupedLatentRM,
 )
-from src.models.gpt2 import COCONUTGPT2ForTokenClassification, CODIGPT2ForTokenClassification, CODIGPT2Config
+from src.models.gpt2 import (
+    COCONUTGPT2ForTokenClassification,
+    CODIGPT2ForTokenClassification,
+    CODIGPT2Config,
+)
 from src.models.llama import COCONUTLlamaForTokenClassification
-from src.models.loss import MaskedBCEWithLogitsLoss, MaskedCrossEntropyLoss, DiversityPenaltyLoss
+from src.models.loss import (
+    MaskedBCEWithLogitsLoss,
+    MaskedCrossEntropyLoss,
+    DiversityPenaltyLoss,
+)
 from src.models.communication import build_communication_module
 
 if is_peft_available():
@@ -30,8 +44,6 @@ if is_peft_available():
 
 @dataclass
 class LatentRMConfig(TrainingArguments):
-
-
     average_tokens_across_devices: bool | None = field(
         default=True,
         metadata={
@@ -41,7 +53,9 @@ class LatentRMConfig(TrainingArguments):
     )
     disable_dropout: bool = field(
         default=True,
-        metadata={"help": "Whether to disable dropout in the model and reference model."},
+        metadata={
+            "help": "Whether to disable dropout in the model and reference model."
+        },
     )
     dataset_num_proc: int | None = field(
         default=None,
@@ -59,10 +73,14 @@ class LatentRMConfig(TrainingArguments):
         default="gpt2",
         metadata={"help": "The family of the model to train."},
     )
-    train_dataset: str = field(default="", metadata={"help": "The path to the dataset."})
+    train_dataset: str = field(
+        default="", metadata={"help": "The path to the dataset."}
+    )
     valid_dataset: dict[str, str] = field(
         default_factory=lambda: {},
-        metadata={"help": "The path to the dataset or a dict of dataset names and paths"},
+        metadata={
+            "help": "The path to the dataset or a dict of dataset names and paths"
+        },
     )
     eval_on_start: bool = field(
         default=True,
@@ -132,11 +150,15 @@ class LatentRMConfig(TrainingArguments):
     )
     communication_type: Literal["none", "mean", "attention", "router"] = field(
         default="none",
-        metadata={"help": "Cross-trajectory communication module to apply before RM scoring."},
+        metadata={
+            "help": "Cross-trajectory communication module to apply before RM scoring."
+        },
     )
     communication_attention_heads: int = field(
         default=4,
-        metadata={"help": "Number of attention heads for soft-attention communication."},
+        metadata={
+            "help": "Number of attention heads for soft-attention communication."
+        },
     )
     communication_topk: int = field(
         default=2,
@@ -159,10 +181,11 @@ class LatentRMTrainer(Trainer):
     def __init__(
         self,
         args: LatentRMConfig,
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        preprocess_logits_for_metrics: Optional[
+            Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        ] = None,
         peft_config: Optional[dict[str, Any] | PeftConfig] = None,
     ):
-
         processing_class = AutoTokenizer.from_pretrained(args.model_id)
         processing_class.pad_token = processing_class.eos_token
 
@@ -181,10 +204,12 @@ class LatentRMTrainer(Trainer):
             processing_class.add_tokens("<|end-latent|>")
             end_id = processing_class.convert_tokens_to_ids("<|end-latent|>")
             rich.print(f"Added <|end-latent|> token : {end_id}")
-        assert (
-            latent_id != start_id and latent_id != end_id
-        ), f"latent_id: {latent_id}, start_id: {start_id}, end_id: {end_id}"
-        rich.print(f"<|latent|>: {latent_id}, <|start-latent|>: {start_id}, <|end-latent|>: {end_id}")
+        assert latent_id != start_id and latent_id != end_id, (
+            f"latent_id: {latent_id}, start_id: {start_id}, end_id: {end_id}"
+        )
+        rich.print(
+            f"<|latent|>: {latent_id}, <|start-latent|>: {start_id}, <|end-latent|>: {end_id}"
+        )
         ### set dataset ###
 
         if args.train_dataset:
@@ -195,7 +220,9 @@ class LatentRMTrainer(Trainer):
                 get_single_sample=args.loss_type == "bce",
             )
             if args.loss_type == "ce":
-                args.per_device_train_batch_size = args.per_device_train_batch_size // train_dataset.n_samples
+                args.per_device_train_batch_size = (
+                    args.per_device_train_batch_size // train_dataset.n_samples
+                )
         else:
             train_dataset = None
 
@@ -204,7 +231,9 @@ class LatentRMTrainer(Trainer):
                 data_dir=dataset,
                 verbose=False,
                 include_gt=True,
-                get_single_sample=not (args.loss_type == "ce" and args.communication_type != "none"),
+                get_single_sample=not (
+                    args.loss_type == "ce" and args.communication_type != "none"
+                ),
             )
             for name, dataset in args.valid_dataset.items()
         }
@@ -262,17 +291,25 @@ class LatentRMTrainer(Trainer):
             )
 
         if is_peft_available() and peft_config is not None:
-            if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_quantized", False):
-
-                prepare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
+            if getattr(model, "is_loaded_in_8bit", False) or getattr(
+                model, "is_quantized", False
+            ):
+                prepare_model_kwargs = {
+                    "use_gradient_checkpointing": args.gradient_checkpointing
+                }
 
                 if args.gradient_checkpointing_kwargs is not None:
-                    prepare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
+                    prepare_model_kwargs["gradient_checkpointing_kwargs"] = (
+                        args.gradient_checkpointing_kwargs
+                    )
 
                 model = prepare_model_for_kbit_training(model, **prepare_model_kwargs)
 
             model = get_peft_model(
-                model, peft_config if isinstance(peft_config, PeftConfig) else PeftConfig(**peft_config)
+                model,
+                peft_config
+                if isinstance(peft_config, PeftConfig)
+                else PeftConfig(**peft_config),
             )
 
         if args.disable_dropout:
@@ -285,12 +322,15 @@ class LatentRMTrainer(Trainer):
         elif args.loss_type == "ce":
             self.loss_fct = MaskedCrossEntropyLoss()
 
-        self.diversity_loss_fct = DiversityPenaltyLoss() if args.diversity_penalty_weight > 0.0 else None
+        self.diversity_loss_fct = (
+            DiversityPenaltyLoss() if args.diversity_penalty_weight > 0.0 else None
+        )
         ### set data collator ###
 
-
         data_collator_class = (
-            DataCollatorForLatentRM if args.loss_type == "bce" else DataCollatorForContrastiveLatentRM
+            DataCollatorForLatentRM
+            if args.loss_type == "bce"
+            else DataCollatorForContrastiveLatentRM
         )
         data_collator = data_collator_class(
             processing_class,
@@ -329,7 +369,11 @@ class LatentRMTrainer(Trainer):
             processing_class=processing_class,
             compute_loss_func=self.compute_loss_func,
             compute_metrics=self.compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience)],
+            callbacks=[
+                EarlyStoppingCallback(
+                    early_stopping_patience=args.early_stopping_patience
+                )
+            ],
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
@@ -360,12 +404,16 @@ class LatentRMTrainer(Trainer):
                 n_samples = self._under_eval_dataset.n_samples
             return self.loss_fct(logits, labels, n_samples=n_samples)
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def compute_loss(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
         trajectory_group_size = inputs.pop("trajectory_group_size", None)
         if trajectory_group_size is not None:
             trajectory_group_size = int(trajectory_group_size.item())
         outputs = model(**inputs, trajectory_group_size=trajectory_group_size)
-        loss = self.compute_loss_func(outputs, inputs["labels"], num_items_in_batch=num_items_in_batch)
+        loss = self.compute_loss_func(
+            outputs, inputs["labels"], num_items_in_batch=num_items_in_batch
+        )
         if (
             self.diversity_loss_fct is not None
             and trajectory_group_size is not None
@@ -401,12 +449,16 @@ class LatentRMTrainer(Trainer):
             scores = torch.where(filter_mask, scores, 0)  # (B, S)
             seq_scores = scores.sum(dim=-1)  # (B,)
         num_test_samples = current_eval_dset.num_test_samples
-        tokenized_inputs = self.processing_class.batch_decode(inputs, skip_special_tokens=True)  # (B,)
-        tokenized_inputs = [tokens.split("<|latent|>")[0] for tokens in tokenized_inputs]
+        tokenized_inputs = self.processing_class.batch_decode(
+            inputs, skip_special_tokens=True
+        )  # (B,)
+        tokenized_inputs = [
+            tokens.split("<|latent|>")[0] for tokens in tokenized_inputs
+        ]
         samples_list = list(set(tokenized_inputs))
-        assert (
-            len(samples_list) == num_test_samples
-        ), f"len(samples_list): {len(samples_list)}, num_test_samples: {num_test_samples}"
+        assert len(samples_list) == num_test_samples, (
+            f"len(samples_list): {len(samples_list)}, num_test_samples: {num_test_samples}"
+        )
 
         results = [[] for _ in range(len(samples_list))]
         sequence_labels = [[] for _ in range(len(samples_list))]
@@ -437,13 +489,19 @@ class LatentRMTrainer(Trainer):
         if (num_add_samples := current_eval_dset.skipped_num_tests) > 0:
             # the testset here is not full, since we excluded the all-true samples in the testsets
             # so we add some all-true samples to the testset
-            results = torch.cat([results, torch.ones(num_add_samples, results.shape[1])], dim=0)
-            sequence_labels = torch.cat(
-                [sequence_labels, torch.ones(num_add_samples, sequence_labels.shape[1])], dim=0
+            results = torch.cat(
+                [results, torch.ones(num_add_samples, results.shape[1])], dim=0
             )
-        assert (
-            results.shape[1] == current_eval_dset.n_samples
-        ), f"results.shape[1]: {results.shape[1]}, current_eval_dset.n_samples: {current_eval_dset.n_samples}"
+            sequence_labels = torch.cat(
+                [
+                    sequence_labels,
+                    torch.ones(num_add_samples, sequence_labels.shape[1]),
+                ],
+                dim=0,
+            )
+        assert results.shape[1] == current_eval_dset.n_samples, (
+            f"results.shape[1]: {results.shape[1]}, current_eval_dset.n_samples: {current_eval_dset.n_samples}"
+        )
         # 然后这就变成了一个ranking task
         _, recall_at_1 = self.rank_at_k(results, sequence_labels, 1)
         metrics = {"recall_at_1": recall_at_1}
@@ -454,7 +512,9 @@ class LatentRMTrainer(Trainer):
         return metrics
 
     @staticmethod
-    def rank_at_k(results: torch.Tensor, labels: torch.Tensor, k: int) -> tuple[float, float]:
+    def rank_at_k(
+        results: torch.Tensor, labels: torch.Tensor, k: int
+    ) -> tuple[float, float]:
         topk_idx = results.topk(k, dim=1).indices  # (N, k)
         sorted_labels = torch.gather(labels, 1, topk_idx)  # (N, k)
 
@@ -474,14 +534,39 @@ class LatentRMTrainer(Trainer):
         return ndcg.mean().item(), recall.mean().item()
 
     def compute_metrics(self, eval_pred: EvalPrediction) -> dict[str, float]:
-        predictions: np.ndarray = eval_pred.predictions  # (B, S, D)
-        predictions = torch.from_numpy(predictions)
-        labels: np.ndarray = eval_pred.label_ids  # (B, S)
-        labels = torch.from_numpy(labels)
+        predictions = eval_pred.predictions  # (B, S, D)
+        if isinstance(predictions, (tuple, list)):
+            predictions = predictions[0]
+        if isinstance(predictions, np.ndarray):
+            predictions = torch.from_numpy(predictions)
+        elif isinstance(predictions, torch.Tensor):
+            predictions = predictions.detach().cpu()
+        else:
+            raise TypeError(f"Unsupported predictions type: {type(predictions)}")
+
+        labels = eval_pred.label_ids  # (B, S)
+        if isinstance(labels, (tuple, list)):
+            labels = labels[0]
+        if isinstance(labels, np.ndarray):
+            labels = torch.from_numpy(labels)
+        elif isinstance(labels, torch.Tensor):
+            labels = labels.detach().cpu()
+        else:
+            raise TypeError(f"Unsupported labels type: {type(labels)}")
+
         filter_mask = labels.long() != -100  # remove ignored tokens (-100)
         labels[labels != -100] = (labels[labels != -100] > 0).float()
-        inputs: np.ndarray = eval_pred.inputs  # (B, S)
-        inputs = torch.from_numpy(inputs)
+
+        inputs = eval_pred.inputs  # (B, S)
+        if isinstance(inputs, (tuple, list)):
+            inputs = inputs[0]
+        if isinstance(inputs, np.ndarray):
+            inputs = torch.from_numpy(inputs)
+        elif isinstance(inputs, torch.Tensor):
+            inputs = inputs.detach().cpu()
+        else:
+            raise TypeError(f"Unsupported inputs type: {type(inputs)}")
+
         inputs[inputs == -100] = self.processing_class.pad_token_id
         if self.args.loss_type == "bce":
             scores = predictions.sigmoid().squeeze(-1)
@@ -503,8 +588,20 @@ class LatentRMTrainer(Trainer):
         metric_key_prefix: str = "eval",
     ) -> EvalLoopOutput:
         self._under_eval_dataset = dataloader.dataset
+        if ignore_keys is None:
+            merged_ignore_keys = list(
+                getattr(self.model.config, "keys_to_ignore_at_inference", [])
+            )
+        else:
+            merged_ignore_keys = list(ignore_keys)
+        if "communicated_latent_embeds" not in merged_ignore_keys:
+            merged_ignore_keys.append("communicated_latent_embeds")
         result = super().evaluation_loop(
-            dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix
+            dataloader,
+            description,
+            prediction_loss_only,
+            merged_ignore_keys,
+            metric_key_prefix,
         )
         self._under_eval_dataset = None
         return result
@@ -520,7 +617,9 @@ class LatentRMTrainer(Trainer):
     ) -> DataLoader:
         """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
 
-        data_collator = self.eval_data_collator if not is_training else self.data_collator
+        data_collator = (
+            self.eval_data_collator if not is_training else self.data_collator
+        )
 
         dataloader_params = {
             "batch_size": batch_size,
@@ -537,7 +636,9 @@ class LatentRMTrainer(Trainer):
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
             if is_training:
                 dataloader_params["worker_init_fn"] = partial(
-                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index
+                    seed_worker,
+                    num_workers=self.args.dataloader_num_workers,
+                    rank=self.args.process_index,
                 )
 
         dataloader = DataLoader(dataset, **dataloader_params)
