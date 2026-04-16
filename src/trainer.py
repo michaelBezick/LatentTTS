@@ -448,31 +448,51 @@ class LatentRMTrainer(Trainer):
         elif self.args.loss_type == "ce":
             scores = torch.where(filter_mask, scores, 0)  # (B, S)
             seq_scores = scores.sum(dim=-1)  # (B,)
-        num_test_samples = current_eval_dset.num_test_samples
-        tokenized_inputs = self.processing_class.batch_decode(
-            inputs, skip_special_tokens=True
-        )  # (B,)
-        tokenized_inputs = [
-            tokens.split("<|latent|>")[0] for tokens in tokenized_inputs
-        ]
-        samples_list = list(set(tokenized_inputs))
-        assert len(samples_list) == num_test_samples, (
-            f"len(samples_list): {len(samples_list)}, num_test_samples: {num_test_samples}"
-        )
+        n_samples = current_eval_dset.n_samples
+        expected_total = current_eval_dset.num_test_samples * n_samples
 
-        results = [[] for _ in range(len(samples_list))]
-        sequence_labels = [[] for _ in range(len(samples_list))]
-        for data_i in range(scores.shape[0]):
-            tokenized_input = tokenized_inputs[data_i]
-            indice = samples_list.index(tokenized_input)
-            seq_score = seq_scores[data_i]
-            label = labels[data_i]
-            label = label[label != -100][-1]  # the ground truth at the final token
-            results[indice].append(seq_score.item())
-            sequence_labels[indice].append(label.item())
+        valid_mask = labels != -100
+        if not valid_mask.any(dim=1).all():
+            raise ValueError(
+                "Found samples with all labels == -100 during metric computation"
+            )
 
-        results = torch.tensor(results)  # (N, S)
-        sequence_labels = torch.tensor(sequence_labels, dtype=torch.long)  # (N, S)
+        last_valid_pos = valid_mask.long().sum(dim=1) - 1
+        row_idx = torch.arange(labels.shape[0])
+        sequence_labels_flat = labels[row_idx, last_valid_pos].long()
+
+        if seq_scores.shape[0] > expected_total:
+            rich.print(
+                f"[yellow]Metric warning:[/yellow] received {seq_scores.shape[0]} eval rows, "
+                f"expected {expected_total}. Truncating extras (likely DDP padding)."
+            )
+            seq_scores = seq_scores[:expected_total]
+            sequence_labels_flat = sequence_labels_flat[:expected_total]
+        elif seq_scores.shape[0] < expected_total:
+            rich.print(
+                f"[yellow]Metric warning:[/yellow] received {seq_scores.shape[0]} eval rows, "
+                f"expected {expected_total}. Using available complete groups only."
+            )
+
+        usable_total = (seq_scores.shape[0] // n_samples) * n_samples
+        if usable_total == 0:
+            raise ValueError(
+                f"No complete evaluation groups available: rows={seq_scores.shape[0]}, n_samples={n_samples}"
+            )
+
+        if usable_total != seq_scores.shape[0]:
+            rich.print(
+                f"[yellow]Metric warning:[/yellow] dropping {seq_scores.shape[0] - usable_total} trailing rows "
+                f"to align with n_samples={n_samples}."
+            )
+            seq_scores = seq_scores[:usable_total]
+            sequence_labels_flat = sequence_labels_flat[:usable_total]
+
+        num_test_samples = usable_total // n_samples
+        results = seq_scores.view(num_test_samples, n_samples)  # (N, S)
+        sequence_labels = sequence_labels_flat.view(
+            num_test_samples, n_samples
+        )  # (N, S)
 
         pos_mask = sequence_labels == 1  # (N, S) bool
         neg_mask = ~pos_mask  # (N, S) bool
@@ -632,7 +652,9 @@ class LatentRMTrainer(Trainer):
         if not isinstance(dataset, torch.utils.data.IterableDataset):
             if sampler_fn is not None:
                 dataloader_params["sampler"] = sampler_fn(dataset)
-            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["drop_last"] = (
+                self.args.dataloader_drop_last if is_training else False
+            )
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
             if is_training:
                 dataloader_params["worker_init_fn"] = partial(
