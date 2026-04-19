@@ -1,4 +1,5 @@
 from collections import Counter
+import os
 import time
 from typing import Literal
 import torch
@@ -25,6 +26,47 @@ def synchronize_device(device: torch.device) -> None:
 
 def safe_divide(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
+
+
+def load_local_checkpoint_state_dict(model_id: str) -> dict[str, torch.Tensor] | None:
+    if not os.path.isdir(model_id):
+        return None
+
+    safetensors_path = os.path.join(model_id, "model.safetensors")
+    if os.path.exists(safetensors_path):
+        from safetensors.torch import load_file
+
+        return load_file(safetensors_path, device="cpu")
+
+    pytorch_bin_path = os.path.join(model_id, "pytorch_model.bin")
+    if os.path.exists(pytorch_bin_path):
+        return torch.load(pytorch_bin_path, map_location="cpu")
+
+    return None
+
+
+def restore_communication_module_from_checkpoint(
+    prm: torch.nn.Module,
+    prm_id: str,
+) -> bool:
+    if getattr(prm, "communication_module", None) is None:
+        return False
+
+    state_dict = load_local_checkpoint_state_dict(prm_id)
+    if state_dict is None:
+        return False
+
+    prefix = "communication_module."
+    communication_state_dict = {
+        key[len(prefix) :]: value
+        for key, value in state_dict.items()
+        if key.startswith(prefix)
+    }
+    if len(communication_state_dict) == 0:
+        return False
+
+    prm.communication_module.load_state_dict(communication_state_dict, strict=False)
+    return True
 
 
 @torch.no_grad()
@@ -152,7 +194,9 @@ def main(
             d_model=prm.config.hidden_size,
             n_heads=communication_attention_heads,
             topk=communication_topk,
-        ).to(prm.device)
+        )
+        restore_communication_module_from_checkpoint(prm=prm, prm_id=prm_id)
+        prm.communication_module = prm.communication_module.to(device=prm.device, dtype=prm.dtype)
     prm.eval()
     model.eval()
     dataset = datasets.Dataset.from_json(data_path)
