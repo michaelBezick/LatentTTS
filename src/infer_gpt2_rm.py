@@ -1,4 +1,5 @@
 from collections import Counter
+import json
 import os
 import time
 from typing import Literal
@@ -32,6 +33,122 @@ def trajectory_has_any_correct(value: torch.Tensor | list[bool]) -> bool:
     if isinstance(value, torch.Tensor):
         return bool(value.any().item())
     return any(value)
+
+
+def initialize_pairwise_cosine_stats() -> dict[str, float | int]:
+    return {
+        "num_groups": 0,
+        "pre_pairwise_cos_sum": 0.0,
+        "post_pairwise_cos_sum": 0.0,
+        "pre_collapse_count": 0,
+        "post_collapse_count": 0,
+    }
+
+
+def _to_latent_tensor(latent_embeds: torch.Tensor | list[torch.Tensor] | None) -> torch.Tensor | None:
+    if latent_embeds is None:
+        return None
+    if isinstance(latent_embeds, list):
+        if len(latent_embeds) == 0:
+            return None
+        if not all(isinstance(x, torch.Tensor) for x in latent_embeds):
+            return None
+        min_len = min(x.shape[0] for x in latent_embeds)
+        latent_embeds = torch.stack([x[:min_len] for x in latent_embeds], dim=0)
+    if not isinstance(latent_embeds, torch.Tensor) or latent_embeds.dim() != 3:
+        return None
+    return latent_embeds
+
+
+def _compute_group_pairwise_cosine_means(
+    latent_embeds: torch.Tensor | list[torch.Tensor] | None,
+    trajectory_group_size: int,
+    pool: Literal["mean", "last"],
+) -> torch.Tensor | None:
+    latent_embeds = _to_latent_tensor(latent_embeds)
+    if latent_embeds is None or trajectory_group_size <= 1:
+        return None
+
+    total_trajectories = latent_embeds.shape[0]
+    usable_trajectories = (total_trajectories // trajectory_group_size) * trajectory_group_size
+    if usable_trajectories == 0:
+        return None
+
+    latent_embeds = latent_embeds[:usable_trajectories]
+    if pool == "last":
+        pooled = latent_embeds[:, -1, :]
+    else:
+        pooled = latent_embeds.mean(dim=1)
+
+    num_groups = usable_trajectories // trajectory_group_size
+    pooled = pooled.reshape(num_groups, trajectory_group_size, -1).float()
+    pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
+
+    sim_matrix = torch.matmul(pooled, pooled.transpose(1, 2))
+    off_diag_mask = ~torch.eye(trajectory_group_size, device=sim_matrix.device, dtype=torch.bool).unsqueeze(0)
+    off_diag = sim_matrix.masked_select(off_diag_mask).reshape(num_groups, -1)
+    return off_diag.mean(dim=1)
+
+
+def update_pairwise_cosine_stats(
+    stats: dict[str, float | int],
+    pre_latent_embeds: torch.Tensor | list[torch.Tensor] | None,
+    post_latent_embeds: torch.Tensor | list[torch.Tensor] | None,
+    trajectory_group_size: int,
+    pool: Literal["mean", "last"],
+    collapse_threshold: float,
+) -> dict[str, float | int]:
+    pre_means = _compute_group_pairwise_cosine_means(pre_latent_embeds, trajectory_group_size, pool)
+    post_source = post_latent_embeds if post_latent_embeds is not None else pre_latent_embeds
+    post_means = _compute_group_pairwise_cosine_means(post_source, trajectory_group_size, pool)
+    if pre_means is None or post_means is None:
+        return stats
+
+    num_groups = min(pre_means.shape[0], post_means.shape[0])
+    if num_groups == 0:
+        return stats
+
+    pre_means = pre_means[:num_groups].float().cpu()
+    post_means = post_means[:num_groups].float().cpu()
+
+    stats["num_groups"] += int(num_groups)
+    stats["pre_pairwise_cos_sum"] += float(pre_means.sum().item())
+    stats["post_pairwise_cos_sum"] += float(post_means.sum().item())
+    stats["pre_collapse_count"] += int((pre_means > collapse_threshold).sum().item())
+    stats["post_collapse_count"] += int((post_means > collapse_threshold).sum().item())
+    return stats
+
+
+def merge_pairwise_cosine_stats(all_stats: list[dict[str, float | int]]) -> dict[str, float | int]:
+    merged = initialize_pairwise_cosine_stats()
+    for stats in all_stats:
+        for key in merged:
+            merged[key] += stats.get(key, 0)
+    return merged
+
+
+def finalize_pairwise_cosine_stats(
+    stats: dict[str, float | int],
+    collapse_threshold: float,
+) -> dict[str, float] | None:
+    num_groups = int(stats["num_groups"])
+    if num_groups == 0:
+        return None
+
+    pre_pairwise_cos_mean = float(stats["pre_pairwise_cos_sum"]) / num_groups
+    post_pairwise_cos_mean = float(stats["post_pairwise_cos_sum"]) / num_groups
+    pre_collapse_rate = float(stats["pre_collapse_count"]) / num_groups
+    post_collapse_rate = float(stats["post_collapse_count"]) / num_groups
+    return {
+        "num_groups": num_groups,
+        "pre_pairwise_cos_mean": pre_pairwise_cos_mean,
+        "post_pairwise_cos_mean": post_pairwise_cos_mean,
+        "delta_pairwise_cos_mean": post_pairwise_cos_mean - pre_pairwise_cos_mean,
+        "collapse_threshold": collapse_threshold,
+        "pre_collapse_rate": pre_collapse_rate,
+        "post_collapse_rate": post_collapse_rate,
+        "delta_collapse_rate": post_collapse_rate - pre_collapse_rate,
+    }
 
 
 def load_local_checkpoint_state_dict(model_id: str) -> dict[str, torch.Tensor] | None:
@@ -95,6 +212,10 @@ def main(
     communication_type: Literal["none", "mean", "attention", "router"] = "none",
     communication_attention_heads: int = 4,
     communication_topk: int = 2,
+    report_pairwise_cosine: bool = False,
+    pairwise_cosine_pool: Literal["mean", "last"] = "mean",
+    pairwise_collapse_threshold: float = 0.9,
+    pairwise_cosine_output_path: str | None = None,
 ):
     new_line_after_input = generator_type == "coconut"
     if prm_mode == "beam_search":
@@ -241,6 +362,7 @@ def main(
         "prm_scoring_time_sec": 0.0,
         "wall_time_sec": 0.0,
     }
+    pairwise_cosine_stats = initialize_pairwise_cosine_stats()
 
     accelerator.wait_for_everyone()
     synchronize_device(model.device)
@@ -288,17 +410,26 @@ def main(
         if prm_mode == "best_of_n":
             synchronize_device(prm.device)
             prm_scoring_start = time.perf_counter()
-            prm_scores = prm(
+            prm_outputs = prm(
                 input_ids=inputs["input_ids"].to(prm.device),
                 attention_mask=inputs["attention_mask"].to(prm.device),
                 latent_embeds=output.latent_thoughts.to(prm.device),
                 trajectory_group_size=num_return_sequences,
                 return_dict=True,
-            ).logits.squeeze(
-                -1
-            )  # (B * num_samples, seq)
+            )
+            prm_scores = prm_outputs.logits.squeeze(-1)  # (B * num_samples, seq)
             synchronize_device(prm.device)
             timing_stats["prm_scoring_time_sec"] += time.perf_counter() - prm_scoring_start
+
+            if report_pairwise_cosine:
+                pairwise_cosine_stats = update_pairwise_cosine_stats(
+                    stats=pairwise_cosine_stats,
+                    pre_latent_embeds=output.latent_thoughts,
+                    post_latent_embeds=getattr(prm_outputs, "communicated_latent_embeds", None),
+                    trajectory_group_size=num_return_sequences,
+                    pool=pairwise_cosine_pool,
+                    collapse_threshold=pairwise_collapse_threshold,
+                )
 
             prm_scores = torch.where(
                 (inputs["input_ids"] == prm.config.latent_id).to(prm.device), prm_scores, 0
@@ -307,7 +438,7 @@ def main(
             prm_scores = prm_scores.sum(dim=-1)
             prm_scores = prm_scores.reshape(-1, num_return_sequences)
             top_indices = torch.topk(prm_scores, k=1, dim=1)[1]
-            del prm_scores
+            del prm_scores, prm_outputs
         answer_output = [
             MODELS[generator_type]["answer_extractor"](text_output[i]) for i in range(len(text_output))
         ]
@@ -363,6 +494,11 @@ def main(
             all_corrects = {idx: value for d in all_corrects for idx, value in d.items()}
             voting_accuracies = accelerator.gather_for_metrics([voting_accuracies], use_gather_object=True)
             voting_accuracies = {idx: value for d in voting_accuracies for idx, value in d.items()}
+            if report_pairwise_cosine:
+                pairwise_cosine_stats = accelerator.gather_for_metrics(
+                    [pairwise_cosine_stats], use_gather_object=True
+                )
+                pairwise_cosine_stats = merge_pairwise_cosine_stats(pairwise_cosine_stats)
         timing_stats = accelerator.gather_for_metrics([timing_stats], use_gather_object=True)
     else:
         timing_stats = [timing_stats]
@@ -371,12 +507,35 @@ def main(
         print(f"SEED={seed}")
 
         corrects = np.array(list(accuracies.values()))
-        print(f"Accuracy: {corrects.mean()*100:.4f}%")
+        accuracy = float(corrects.mean())
+        print(f"Accuracy: {accuracy*100:.4f}%")
         if prm_mode == "best_of_n":
-            coverages = np.array([trajectory_has_any_correct(v) for v in all_corrects.values()]).mean()
+            coverages = float(np.array([trajectory_has_any_correct(v) for v in all_corrects.values()]).mean())
             voting_accuracies = np.array(list(voting_accuracies.values()))
+            voting_accuracy = float(voting_accuracies.mean())
             print(f"Coverage: {coverages*100:.4f}%")
-            print(f"Voting Accuracy: {voting_accuracies.mean()*100:.4f}%")
+            print(f"Voting Accuracy: {voting_accuracy*100:.4f}%")
+
+            if report_pairwise_cosine:
+                pairwise_summary = finalize_pairwise_cosine_stats(
+                    pairwise_cosine_stats,
+                    collapse_threshold=pairwise_collapse_threshold,
+                )
+                if pairwise_summary is not None:
+                    print(f"Pairwise Cosine (Pre): {pairwise_summary['pre_pairwise_cos_mean']:.6f}")
+                    print(f"Pairwise Cosine (Post): {pairwise_summary['post_pairwise_cos_mean']:.6f}")
+                    print(f"Pairwise Cosine Delta: {pairwise_summary['delta_pairwise_cos_mean']:.6f}")
+                    print(
+                        f"Collapse Rate @>{pairwise_summary['collapse_threshold']:.2f} (Pre): "
+                        f"{pairwise_summary['pre_collapse_rate']*100:.4f}%"
+                    )
+                    print(
+                        f"Collapse Rate @>{pairwise_summary['collapse_threshold']:.2f} (Post): "
+                        f"{pairwise_summary['post_collapse_rate']*100:.4f}%"
+                    )
+                    print(
+                        f"Collapse Rate Delta: {pairwise_summary['delta_collapse_rate']*100:.4f}%"
+                    )
 
         total_examples = sum(stats["num_examples"] for stats in timing_stats)
         total_trajectories = sum(stats["num_trajectories"] for stats in timing_stats)
@@ -403,6 +562,35 @@ def main(
                 f"Avg PRM Scoring Time / Batch (s): "
                 f"{safe_divide(prm_scoring_time_sec, max_num_batches):.4f}"
             )
+
+        if pairwise_cosine_output_path is not None:
+            summary = {
+                "seed": seed,
+                "generator_type": generator_type,
+                "prm_id": prm_id,
+                "prm_mode": prm_mode,
+                "communication_type": communication_type,
+                "num_return_sequences": num_return_sequences,
+                "data_path": data_path,
+                "accuracy": accuracy,
+                "coverage": coverages if prm_mode == "best_of_n" else None,
+                "voting_accuracy": voting_accuracy if prm_mode == "best_of_n" else None,
+                "wall_time_sec": wall_time_sec,
+                "generation_time_sec": generation_time_sec,
+                "prm_scoring_time_sec": prm_scoring_time_sec,
+            }
+            if report_pairwise_cosine and prm_mode == "best_of_n":
+                summary["pairwise_cosine"] = finalize_pairwise_cosine_stats(
+                    pairwise_cosine_stats,
+                    collapse_threshold=pairwise_collapse_threshold,
+                )
+                summary["pairwise_cosine_pool"] = pairwise_cosine_pool
+            output_dir = os.path.dirname(pairwise_cosine_output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            with open(pairwise_cosine_output_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2)
+            print(f"Wrote pairwise cosine summary to {pairwise_cosine_output_path}")
 
 
 if __name__ == "__main__":
