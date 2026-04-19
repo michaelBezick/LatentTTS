@@ -4,7 +4,10 @@
 
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_mode_collapse_ablation.sh}"
 GENERATOR_TYPE="${GENERATOR_TYPE:-coconut}"
-PRM_ID="${PRM_ID:-outputs/coconut-soft-attention/best}"
+ATTENTION_PRM_ID="${ATTENTION_PRM_ID:-${PRM_ID:-outputs/coconut-soft-attention/best}}"
+BASELINE_PRM_ID="${BASELINE_PRM_ID:-checkpoints/latentRM}"
+ATTENTION_COMMUNICATION_TYPE="${ATTENTION_COMMUNICATION_TYPE:-attention}"
+BASELINE_COMMUNICATION_TYPE="${BASELINE_COMMUNICATION_TYPE:-none}"
 DATA_PATH="${DATA_PATH:-data/gsm_valid.json}"
 NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-64}"
 MODEL_DTYPE="${MODEL_DTYPE:-bf16}"
@@ -21,7 +24,10 @@ mkdir -p "${RUN_DIR}"
 
 echo "hostname: $(hostname)"
 echo "repo_root: ${REPO_ROOT}"
-echo "prm_id: ${PRM_ID}"
+echo "attention_prm_id: ${ATTENTION_PRM_ID}"
+echo "baseline_prm_id: ${BASELINE_PRM_ID}"
+echo "attention_communication_type: ${ATTENTION_COMMUNICATION_TYPE}"
+echo "baseline_communication_type: ${BASELINE_COMMUNICATION_TYPE}"
 echo "data_path: ${DATA_PATH}"
 echo "num_return_sequences: ${NUM_RETURN_SEQUENCES}"
 echo "seed: ${SEED}"
@@ -48,26 +54,26 @@ srun python -m src.infer_gpt2_rm \
     --generator_type="${GENERATOR_TYPE}" \
     --prm_mode=best_of_n \
     --model_dtype="${MODEL_DTYPE}" \
-    --prm_id="${PRM_ID}" \
+    --prm_id="${ATTENTION_PRM_ID}" \
     --data_path="${DATA_PATH}" \
     --num_return_sequences="${NUM_RETURN_SEQUENCES}" \
     --seed="${SEED}" \
-    --communication_type=attention \
+    --communication_type="${ATTENTION_COMMUNICATION_TYPE}" \
     --report_pairwise_cosine=True \
     --pairwise_cosine_pool="${PAIRWISE_COSINE_POOL}" \
     --pairwise_collapse_threshold="${PAIRWISE_COLLAPSE_THRESHOLD}" \
     --pairwise_cosine_output_path="${ATTN_JSON}" | tee "${ATTN_LOG}"
 
-echo "Running no-communication baseline condition (same checkpoint)..."
+echo "Running no-attention baseline condition..."
 srun python -m src.infer_gpt2_rm \
     --generator_type="${GENERATOR_TYPE}" \
     --prm_mode=best_of_n \
     --model_dtype="${MODEL_DTYPE}" \
-    --prm_id="${PRM_ID}" \
+    --prm_id="${BASELINE_PRM_ID}" \
     --data_path="${DATA_PATH}" \
     --num_return_sequences="${NUM_RETURN_SEQUENCES}" \
     --seed="${SEED}" \
-    --communication_type=none \
+    --communication_type="${BASELINE_COMMUNICATION_TYPE}" \
     --report_pairwise_cosine=True \
     --pairwise_cosine_pool="${PAIRWISE_COSINE_POOL}" \
     --pairwise_collapse_threshold="${PAIRWISE_COLLAPSE_THRESHOLD}" \
@@ -94,7 +100,7 @@ attn_pair = attn.get("pairwise_cosine") or {}
 base_pair = baseline.get("pairwise_cosine") or {}
 
 lines = [
-    "Mode Collapse Ablation (same checkpoint baseline)",
+    "Mode Collapse Ablation (separate no-attention baseline)",
     f"Attention communication: {attn_path}",
     f"No-communication baseline: {baseline_path}",
     "",
