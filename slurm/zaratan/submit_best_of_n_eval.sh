@@ -7,7 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${REPO_ROOT}/logs/slurm"
 
 GENERATOR_TYPE="${GENERATOR_TYPE:-coconut}"
-PRM_ID="${PRM_ID:-checkpoints/latentRM}"
+PRM_ID="${PRM_ID:-outputs/coconut-soft-attention/best}"
 DATA_PATH="${DATA_PATH:-data/gsm_valid.json}"
 NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-64}"
 COMMUNICATION_TYPE="${COMMUNICATION_TYPE:-attention}"
