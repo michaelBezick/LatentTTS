@@ -28,6 +28,12 @@ def safe_divide(numerator: float, denominator: float) -> float:
     return numerator / denominator if denominator else 0.0
 
 
+def trajectory_has_any_correct(value: torch.Tensor | list[bool]) -> bool:
+    if isinstance(value, torch.Tensor):
+        return bool(value.any().item())
+    return any(value)
+
+
 def load_local_checkpoint_state_dict(model_id: str) -> dict[str, torch.Tensor] | None:
     if not os.path.isdir(model_id):
         return None
@@ -331,7 +337,9 @@ def main(
             _corrects = torch.tensor(list(accuracies.values())).long().sum()
             cur_num_samples = len(accuracies)
             if prm_mode == "best_of_n":
-                _cov = torch.tensor([v.any().long() for v in all_corrects.values()]).long().sum()
+                _cov = torch.tensor(
+                    [trajectory_has_any_correct(v) for v in all_corrects.values()]
+                ).long().sum()
                 _voting = torch.tensor(list(voting_accuracies.values())).long().sum()
                 _dict = dict(
                     Cov=f"{_cov/cur_num_samples*100:.4f}% ({_cov}/{cur_num_samples})",
@@ -365,8 +373,7 @@ def main(
         corrects = np.array(list(accuracies.values()))
         print(f"Accuracy: {corrects.mean()*100:.4f}%")
         if prm_mode == "best_of_n":
-            all_corrects = np.array(list(all_corrects.values()))
-            coverages = all_corrects.any(axis=-1).mean()
+            coverages = np.array([trajectory_has_any_correct(v) for v in all_corrects.values()]).mean()
             voting_accuracies = np.array(list(voting_accuracies.values()))
             print(f"Coverage: {coverages*100:.4f}%")
             print(f"Voting Accuracy: {voting_accuracies.mean()*100:.4f}%")
