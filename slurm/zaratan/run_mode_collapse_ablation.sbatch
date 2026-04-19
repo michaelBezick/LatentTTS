@@ -32,7 +32,9 @@ echo "pairwise_collapse_threshold: ${PAIRWISE_COLLAPSE_THRESHOLD}"
 echo "results_dir: ${RUN_DIR}"
 echo "slurm_job_id: ${SLURM_JOB_ID:-unknown}"
 
+set +u
 source ~/.bashrc.conda
+set -u
 conda activate latenttts
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
