@@ -2,8 +2,6 @@
 #SBATCH --output=logs/slurm/%x-%j.out
 #SBATCH --error=logs/slurm/%x-%j.err
 
-set -euo pipefail
-
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_mode_collapse_ablation.sh}"
 GENERATOR_TYPE="${GENERATOR_TYPE:-coconut}"
 PRM_ID="${PRM_ID:-outputs/coconut-soft-attention/best}"
@@ -32,9 +30,7 @@ echo "pairwise_collapse_threshold: ${PAIRWISE_COLLAPSE_THRESHOLD}"
 echo "results_dir: ${RUN_DIR}"
 echo "slurm_job_id: ${SLURM_JOB_ID:-unknown}"
 
-set +u
 source ~/.bashrc.conda
-set -u
 conda activate latenttts
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
