@@ -1,0 +1,41 @@
+run_name: "coconut-generator-attention"
+output_dir: "outputs/coconut-generator-attention"
+
+model_id: "checkpoints/coconut"
+prm_id: "checkpoints/latentRM"
+
+train_data_path: "data/gsm_train.json"
+valid_data_path: "data/gsm_valid.json"
+
+model_dtype: "bf16"
+seed: 42
+
+num_return_sequences: 8
+latent_length: 6
+
+communication_type: "attention"
+communication_attention_heads: 4
+communication_every: 1
+
+sampling_by: "dropout"
+dropout_p: 0.2
+
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4
+
+learning_rate: 1.0e-4
+weight_decay: 0.0
+warmup_ratio: 0.05
+lr_scheduler_type: "cosine"
+num_train_epochs: 5
+max_grad_norm: 1.0
+
+logging_steps: 10
+eval_frequency: 1
+eval_on_start: true
+metric_for_best_model: "eval_max_path_score"
+
+score_temperature: 0.25
+diversity_penalty_weight: 0.1
+anchor_weight: 0.01

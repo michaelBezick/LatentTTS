@@ -1,5 +1,59 @@
+import os
+
 import torch
 import torch.nn as nn
+
+
+def load_local_checkpoint_state_dict(checkpoint_path: str) -> dict[str, torch.Tensor] | None:
+    if os.path.isdir(checkpoint_path):
+        safetensors_path = os.path.join(checkpoint_path, "model.safetensors")
+        if os.path.exists(safetensors_path):
+            from safetensors.torch import load_file
+
+            return load_file(safetensors_path, device="cpu")
+
+        pytorch_bin_path = os.path.join(checkpoint_path, "pytorch_model.bin")
+        if os.path.exists(pytorch_bin_path):
+            return torch.load(pytorch_bin_path, map_location="cpu")
+        return None
+
+    if os.path.isfile(checkpoint_path):
+        if checkpoint_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+
+            return load_file(checkpoint_path, device="cpu")
+        return torch.load(checkpoint_path, map_location="cpu")
+
+    return None
+
+
+def restore_communication_module_from_checkpoint(
+    module_owner: nn.Module,
+    checkpoint_path: str,
+    prefix: str = "communication_module.",
+) -> bool:
+    communication_module = getattr(module_owner, "communication_module", None)
+    if communication_module is None:
+        return False
+
+    state_dict = load_local_checkpoint_state_dict(checkpoint_path)
+    if state_dict is None:
+        return False
+
+    communication_state_dict = {
+        key[len(prefix) :]: value
+        for key, value in state_dict.items()
+        if key.startswith(prefix)
+    }
+    if len(communication_state_dict) == 0:
+        communication_state_dict = state_dict
+
+    missing_keys, unexpected_keys = communication_module.load_state_dict(
+        communication_state_dict, strict=False
+    )
+    if len(unexpected_keys) > 0 and len(communication_state_dict) == len(state_dict):
+        return False
+    return True
 
 class BaseCommunication(nn.Module):
     def forward(self, x, alive_mask=None, step_idx=None):

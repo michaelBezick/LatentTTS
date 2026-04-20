@@ -16,7 +16,10 @@ from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
 from .paths import MODELS
 from .models.gpt2 import COCONUTGPT2ForTokenClassification
 from .models.llama import COCONUTLlamaForTokenClassification
-from .models.communication import build_communication_module
+from .models.communication import (
+    build_communication_module,
+    restore_communication_module_from_checkpoint,
+)
 from .utils import set_seed, InferenceCollator
 
 
@@ -150,48 +153,6 @@ def finalize_pairwise_cosine_stats(
         "delta_collapse_rate": post_collapse_rate - pre_collapse_rate,
     }
 
-
-def load_local_checkpoint_state_dict(model_id: str) -> dict[str, torch.Tensor] | None:
-    if not os.path.isdir(model_id):
-        return None
-
-    safetensors_path = os.path.join(model_id, "model.safetensors")
-    if os.path.exists(safetensors_path):
-        from safetensors.torch import load_file
-
-        return load_file(safetensors_path, device="cpu")
-
-    pytorch_bin_path = os.path.join(model_id, "pytorch_model.bin")
-    if os.path.exists(pytorch_bin_path):
-        return torch.load(pytorch_bin_path, map_location="cpu")
-
-    return None
-
-
-def restore_communication_module_from_checkpoint(
-    prm: torch.nn.Module,
-    prm_id: str,
-) -> bool:
-    if getattr(prm, "communication_module", None) is None:
-        return False
-
-    state_dict = load_local_checkpoint_state_dict(prm_id)
-    if state_dict is None:
-        return False
-
-    prefix = "communication_module."
-    communication_state_dict = {
-        key[len(prefix) :]: value
-        for key, value in state_dict.items()
-        if key.startswith(prefix)
-    }
-    if len(communication_state_dict) == 0:
-        return False
-
-    prm.communication_module.load_state_dict(communication_state_dict, strict=False)
-    return True
-
-
 @torch.no_grad()
 def main(
     generator_type: Literal["coconut", "codi"] = "coconut",
@@ -209,6 +170,11 @@ def main(
     seed: int = 200,
     sort_by_len: bool = True,
     progress_bar: bool = True,
+    generator_communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    generator_communication_checkpoint: str | None = None,
+    generator_communication_attention_heads: int = 4,
+    generator_communication_topk: int = 2,
+    generator_communication_every: int = 1,
     communication_type: Literal["none", "mean", "attention", "router"] = "none",
     communication_attention_heads: int = 4,
     communication_topk: int = 2,
@@ -217,6 +183,11 @@ def main(
     pairwise_collapse_threshold: float = 0.9,
     pairwise_cosine_output_path: str | None = None,
 ):
+    if prm_mode == "beam_search" and generator_communication_type != "none":
+        raise ValueError(
+            "Generator-side communication is only supported for sampled best_of_n inference. "
+            "The beam_search path is not overridden in this repo."
+        )
     new_line_after_input = generator_type == "coconut"
     if prm_mode == "beam_search":
         assert num_return_sequences == 1
@@ -255,6 +226,8 @@ def main(
         latent_length=latent_length,
         latent_do_sample=True,
         latent_do_sample_by="dropout",
+        communication_type=generator_communication_type,
+        communication_every=generator_communication_every,
         generation_mode="beam_search" if prm_mode == "beam_search" else None,
         # do_sample=False,
         num_beams=num_beams,
@@ -281,6 +254,25 @@ def main(
             torch.bfloat16 if model_dtype == "bf16" else (torch.float16 if model_dtype == "fp16" else None)
         ),
     )
+    if generator_communication_type != "none":
+        model.communication_module = build_communication_module(
+            communication_type=generator_communication_type,
+            d_model=model.config.hidden_size,
+            n_heads=generator_communication_attention_heads,
+            topk=generator_communication_topk,
+        )
+        if generator_communication_checkpoint is not None:
+            restored = restore_communication_module_from_checkpoint(
+                module_owner=model,
+                checkpoint_path=generator_communication_checkpoint,
+            )
+            if not restored:
+                raise ValueError(
+                    f"Could not restore generator communication module from {generator_communication_checkpoint}"
+                )
+        model.communication_module = model.communication_module.to(
+            device=model.device, dtype=model.dtype
+        )
     if prm_model_family == "llama":
 
         prm_processing_class = AutoTokenizer.from_pretrained(prm_id)
@@ -322,7 +314,10 @@ def main(
             n_heads=communication_attention_heads,
             topk=communication_topk,
         )
-        restore_communication_module_from_checkpoint(prm=prm, prm_id=prm_id)
+        restore_communication_module_from_checkpoint(
+            module_owner=prm,
+            checkpoint_path=prm_id,
+        )
         prm.communication_module = prm.communication_module.to(device=prm.device, dtype=prm.dtype)
     prm.eval()
     model.eval()
@@ -569,6 +564,8 @@ def main(
                 "generator_type": generator_type,
                 "prm_id": prm_id,
                 "prm_mode": prm_mode,
+                "generator_communication_type": generator_communication_type,
+                "generator_communication_checkpoint": generator_communication_checkpoint,
                 "communication_type": communication_type,
                 "num_return_sequences": num_return_sequences,
                 "data_path": data_path,

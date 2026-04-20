@@ -609,6 +609,7 @@ class LatentGenerationMixin(GenerationMixin):
                     flat_BN, d = new_token_embedding.shape
                     assert flat_BN % num_paths == 0
                     base_B = flat_BN // num_paths
+                    latent_step_idx = int((input_ids == self.config.latent_id).sum(dim=-1).max().item())
 
                     grouped = new_token_embedding.view(base_B, num_paths, d)
                     # alive_mask marks paths still in the latent phase; finished paths
@@ -617,11 +618,12 @@ class LatentGenerationMixin(GenerationMixin):
 
                     comm = getattr(self, "communication_module", None)
 
-                    grouped = comm(
-                        grouped,
-                        alive_mask=grouped_alive,
-                        step_idx=cur_len,
-                    )
+                    if latent_step_idx % max(1, generation_config.communication_every) == 0:
+                        grouped = comm(
+                            grouped,
+                            alive_mask=grouped_alive,
+                            step_idx=latent_step_idx,
+                        )
 
                     new_token_embedding = grouped.view(flat_BN, d)
 
