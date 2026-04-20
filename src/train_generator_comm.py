@@ -164,14 +164,13 @@ def rollout_latent_paths(
         enable_dropout(model)
     try:
         for latent_step in range(latent_length):
-            outputs = model(
+            transformer_outputs = model.transformer(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 use_cache=False,
-                output_hidden_states=True,
                 return_dict=True,
             )
-            next_latent = outputs.hidden_states[-1][:, -1, :]
+            next_latent = transformer_outputs.last_hidden_state[:, -1, :]
             pre_communication_steps.append(next_latent)
 
             if latent_step % max(1, communication_every) == 0:
@@ -277,6 +276,7 @@ class GeneratorCommunicationTrainer:
             pad_token_id=self.tokenizer.pad_token_id,
             torch_dtype=self.torch_dtype,
         )
+        self.prm.config.use_cache = False
         for param in self.prm.parameters():
             param.requires_grad = False
         self.prm.eval()
@@ -425,6 +425,7 @@ class GeneratorCommunicationTrainer:
             input_ids=rollout.input_ids,
             attention_mask=rollout.attention_mask,
             latent_embeds=rollout.latent_thoughts,
+            use_cache=False,
             return_dict=True,
         )
         prm_scores = prm_outputs.logits.squeeze(-1)
