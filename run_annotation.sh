@@ -8,6 +8,8 @@
 DATASET_PIECE="${DATASET_PIECE:-1.0}"
 DATASET_INDICE="${DATASET_INDICE:-0}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
+USE_WANDB="${USE_WANDB:-False}"
+WANDB_PROJECT="${WANDB_PROJECT:-annotation-latent-data}"
 
 default_params=(
     "--save_path=latent-data/coconut"
@@ -16,7 +18,8 @@ default_params=(
     "--seed=42"
     "--generation_latent_do_sample_by=dropout"
     "--generation_dropout_p=0.2"
-    "--use_wandb=False"
+    "--use_wandb=${USE_WANDB}"
+    "--wandb_project=${WANDB_PROJECT}"
     "--num_latents=8"
     "--n_samples_per_step=8"
 )

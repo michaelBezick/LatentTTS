@@ -1,3 +1,5 @@
+import os
+
 from transformers import HfArgumentParser
 
 from src.trainer import LatentRMTrainer, LatentRMConfig
@@ -19,6 +21,9 @@ def main(*args, **kwargs):
         trainer_args = parser.parse_dict(kwargs)[0]
     else:
         raise ValueError(f"Invalid arguments: {args}")
+
+    if trainer_args.report_to == "none" and os.getenv("WANDB_MODE"):
+        trainer_args.report_to = "wandb"
 
     trainer = LatentRMTrainer(args=trainer_args)
     trainer.train()

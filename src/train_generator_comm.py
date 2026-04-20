@@ -56,6 +56,9 @@ class GeneratorCommunicationConfig:
     logging_steps: int = field(default=10)
     eval_frequency: int = field(default=1)
     eval_on_start: bool = field(default=True)
+    use_wandb: bool = field(default=False)
+    wandb_project: str = field(default="latenttts-generator-communication")
+    wandb_entity: str = field(default="")
     metric_for_best_model: Literal["eval_loss", "eval_max_path_score"] = field(
         default="eval_max_path_score"
     )
@@ -369,6 +372,8 @@ class GeneratorCommunicationTrainer:
         self.diversity_loss_fct = DiversityPenaltyLoss()
         self.best_metric = None
         self.global_step = 0
+        self.wandb_run = None
+        self.use_wandb = args.use_wandb or os.getenv("WANDB_MODE") is not None
 
         if self.accelerator.is_main_process:
             os.makedirs(args.output_dir, exist_ok=True)
@@ -378,7 +383,30 @@ class GeneratorCommunicationTrainer:
                 encoding="utf-8",
             ) as f:
                 json.dump(asdict(args), f, indent=2)
+            if self.use_wandb:
+                try:
+                    import wandb
+                except ImportError as exc:
+                    raise ImportError(
+                        "W&B logging requested for generator communication training, but wandb is not installed."
+                    ) from exc
+                wandb_init_kwargs = {
+                    "project": args.wandb_project,
+                    "name": args.run_name,
+                    "config": asdict(args),
+                }
+                if args.wandb_entity:
+                    wandb_init_kwargs["entity"] = args.wandb_entity
+                self.wandb_run = wandb.init(**wandb_init_kwargs)
         self.accelerator.wait_for_everyone()
+
+    def log_wandb(self, metrics: dict[str, float], step: int | None = None):
+        if not self.accelerator.is_main_process or self.wandb_run is None:
+            return
+        if step is None:
+            self.wandb_run.log(metrics)
+        else:
+            self.wandb_run.log(metrics, step=step)
 
     def compute_batch_objective(self, batch: dict[str, torch.Tensor]):
         rollout = rollout_latent_paths(
@@ -529,12 +557,16 @@ class GeneratorCommunicationTrainer:
         if self.best_metric is None or current_metric > self.best_metric:
             self.best_metric = current_metric
             self.save_checkpoint("best", metrics)
+            if self.accelerator.is_main_process and self.wandb_run is not None:
+                for key, value in metrics.items():
+                    self.wandb_run.summary[key] = value
 
     def train(self):
         if self.eval_dataloader is not None and self.args.eval_on_start:
             eval_metrics = self.evaluate()
             if self.accelerator.is_main_process:
                 print(json.dumps(eval_metrics, indent=2))
+            self.log_wandb(eval_metrics, step=self.global_step)
             self.maybe_save_best(eval_metrics)
             self.accelerator.wait_for_everyone()
 
@@ -584,18 +616,15 @@ class GeneratorCommunicationTrainer:
                 progress_bar.update(1)
                 if self.accelerator.is_main_process and self.global_step % self.args.logging_steps == 0:
                     denom = float(self.args.logging_steps)
-                    print(
-                        json.dumps(
-                            {
-                                "step": self.global_step,
-                                "train_loss": running_loss / denom,
-                                "train_score_loss": running_score_loss / denom,
-                                "train_diversity_loss": running_diversity_loss / denom,
-                                "train_anchor_loss": running_anchor_loss / denom,
-                                "lr": self.lr_scheduler.get_last_lr()[0],
-                            }
-                        )
-                    )
+                    train_metrics = {
+                        "train_loss": running_loss / denom,
+                        "train_score_loss": running_score_loss / denom,
+                        "train_diversity_loss": running_diversity_loss / denom,
+                        "train_anchor_loss": running_anchor_loss / denom,
+                        "lr": self.lr_scheduler.get_last_lr()[0],
+                    }
+                    print(json.dumps({"step": self.global_step} | train_metrics))
+                    self.log_wandb(train_metrics, step=self.global_step)
                     running_loss = 0.0
                     running_score_loss = 0.0
                     running_diversity_loss = 0.0
@@ -609,6 +638,7 @@ class GeneratorCommunicationTrainer:
                     eval_metrics = self.evaluate()
                     if self.accelerator.is_main_process:
                         print(json.dumps({"step": self.global_step} | eval_metrics))
+                    self.log_wandb(eval_metrics, step=self.global_step)
                     self.maybe_save_best(eval_metrics)
                     self.accelerator.wait_for_everyone()
 
@@ -620,8 +650,11 @@ class GeneratorCommunicationTrainer:
         final_metrics = {"step": self.global_step}
         if self.eval_dataloader is not None:
             final_metrics |= self.evaluate()
+            self.log_wandb({k: v for k, v in final_metrics.items() if k != "step"}, step=self.global_step)
             self.maybe_save_best(final_metrics)
         self.save_checkpoint("last", final_metrics)
+        if self.accelerator.is_main_process and self.wandb_run is not None:
+            self.wandb_run.finish()
         self.accelerator.wait_for_everyone()
         progress_bar.close()
 

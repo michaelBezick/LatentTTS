@@ -34,6 +34,8 @@ max_grad_norm: 1.0
 logging_steps: 10
 eval_frequency: 1
 eval_on_start: true
+use_wandb: true
+wandb_project: "latenttts-generator-communication"
 metric_for_best_model: "eval_max_path_score"
 
 score_temperature: 0.25
