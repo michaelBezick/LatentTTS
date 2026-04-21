@@ -65,14 +65,14 @@ Local training:
 
 ```bash
 accelerate launch -m src.train_generator_interaction \
-  training_args/train_coconut_generator_interaction_attention.yaml
+  training_args/train_coconut_generator_interaction_verifiable_rl.yaml
 ```
 
-This workflow freezes the generator, learns only the generator-side interaction module, and selects checkpoints by `eval_max_path_score`.
+This workflow freezes the generator, learns only the generator-side interaction module, and can optimize either the original PRM objective or the verifiable-reward RL objective.
 
 The current primary config is:
 
-- `training_args/train_coconut_generator_interaction_attention.yaml`
+- `training_args/train_coconut_generator_interaction_verifiable_rl.yaml`
 
 Note: the underlying Python and YAML interface still uses `communication_*` keys for compatibility, even though the user-facing workflow is described as interaction.
 
@@ -123,7 +123,7 @@ PARTITION=<your_partition> \
 QOS=<your_qos> \
 NUM_GPUS=4 \
 ./slurm/zaratan/submit_train_generator_interaction.sh \
-  training_args/train_coconut_generator_interaction_attention.yaml
+  training_args/train_coconut_generator_interaction_verifiable_rl.yaml
 ```
 
 Primary generator-side interaction eval:
@@ -229,6 +229,7 @@ LatentTTS/
 │   └── zaratan/
 ├── training_args/
 │   ├── train_coconut_generator_interaction_attention.yaml
+│   ├── train_coconut_generator_interaction_verifiable_rl.yaml
 │   └── train_coconut_soft_attention.yaml
 ├── run_annotation.sh
 ├── data/
