@@ -17,7 +17,7 @@ max_new_tokens: 128
 
 communication_type: "attention"
 communication_attention_heads: 4
-communication_every: 1
+communication_every: 2
 
 sampling_by: "noise"
 noise_std: 0.1
@@ -37,11 +37,11 @@ max_grad_norm: 1.0
 
 logging_steps: 10
 eval_frequency: 4
-eval_on_start: false
+eval_on_start: true
 use_wandb: true
 wandb_project: "latenttts-generator-interaction"
 metric_for_best_model: "eval_selected_accuracy"
 
 reward_baseline: "leave_one_out"
-diversity_penalty_weight: 0.1
+diversity_penalty_weight: 0.2
 anchor_weight: 0.01

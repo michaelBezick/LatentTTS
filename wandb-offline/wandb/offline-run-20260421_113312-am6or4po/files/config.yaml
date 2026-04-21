@@ -1,0 +1,281 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    python_version: 3.11.15
+    cli_version: 0.26.0
+    framework: huggingface
+    huggingface_version: 4.52.4
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1776785595
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 71
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 71
+      3:
+      - 2
+      - 4
+      - 13
+      - 16
+      - 42
+      - 61
+      - 62
+      4: 3.11.15
+      5: 0.26.0
+      6: 4.52.4
+      13: linux-x86_64
+    e:
+      du2ovehsjs3un02ufcuqsyjqn7bgc79g:
+        os: Linux-4.18.0-553.89.1.el8_10.x86_64-x86_64-with-glibc2.28
+        python: CPython 3.11.15
+        started_at: '2026-04-21T15:33:12.924507Z'
+        args:
+        - training_args/train_coconut_generator_interaction_verifiable_rl.yaml
+        program: -m src.train_generator_interaction
+        git:
+          remote_url: https://github.com/michaelBezick/LatentTTS.git
+          commit: a62c573a601d02b1b73c84ccd02b3fa93b5447a9
+        root: /home/mbezick/scratch/LatentTTS/wandb-offline
+        host: gpu-b10-2.zaratan.umd.edu
+        executable: /home/mbezick/scratch/conda/miniforge-26.1.1/envs/latenttts/bin/python3.11
+        cpu_count: 128
+        cpu_count_logical: 128
+        gpu_type: NVIDIA A100-SXM4-40GB
+        gpu_count: 4
+        disk:
+          /:
+            total: '33501757440'
+            used: '10187354112'
+        memory:
+          total: '540064661504'
+        gpu_nvidia:
+        - name: NVIDIA A100-SXM4-40GB
+          memory_total: '42949672960'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-5dd461d3-6aee-60df-f54c-276e43b7366c
+        - name: NVIDIA A100-SXM4-40GB
+          memory_total: '42949672960'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-1174b90c-6eeb-00fb-f4d0-2ea8eed19278
+        - name: NVIDIA A100-SXM4-40GB
+          memory_total: '42949672960'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-c7e06a22-1ee3-a7d5-4df7-90b57809cf2a
+        - name: NVIDIA A100-SXM4-40GB
+          memory_total: '42949672960'
+          cuda_cores: 6912
+          architecture: Ampere
+          uuid: GPU-22910a9f-cab2-2fcc-744c-33718681d001
+        cuda_version: '13.1'
+        slurm:
+          gpus_on_node: '4'
+          cpu_bind_list: '0x00FF000000FF000000FF000000FF0000'
+          submit_host: login-2.zaratan.umd.edu
+          step_num_nodes: '1'
+          step_launcher_port: '62947'
+          launch_node_ipaddr: 10.102.35.9
+          distribution: cyclic
+          cpus_on_node: '32'
+          pmix_mapping_serv: (vector,(0,1,1))
+          umask: '0022'
+          submit_dir: /scratch/zt1/project/kaiqing-prj/user/mbezick/LatentTTS
+          nodeid: '0'
+          job_nodelist: gpu-b10-2
+          cpus_per_task: '32'
+          tres_per_task: cpu=32
+          cpu_bind_verbose: quiet
+          job_gid: '102553'
+          job_partition: gpu-a100
+          job_name: latenttts-gen-interaction-train
+          cpu_bind: quiet,mask_cpu:0x00FF000000FF000000FF000000FF0000
+          conf: /etc/slurm/slurm.conf
+          job_cpus_per_node: '32'
+          step_id: '0'
+          job_end_time: '1776871527'
+          stepid: '0'
+          cluster_name: zaratan
+          step_nodelist: gpu-b10-2
+          oom_kill_step: '0'
+          task_pid: '55638'
+          topology_addr: top.b8cef60300d55b46.gpu-b10-2
+          job_gpus: 0,1,2,3
+          job_account: kaiqing-prj-aac
+          procid: '0'
+          localid: '0'
+          mem_per_node: '245760'
+          srun_comm_port: '62947'
+          job_user: mbezick
+          topology_addr_pattern: switch.switch.node
+          pmixp_abort_agent_port: '62519'
+          job_qos: normal
+          job_num_nodes: '1'
+          nodelist: gpu-b10-2
+          srun_comm_host: 10.102.35.9
+          mpi_type: pmix
+          gtids: '0'
+          jobid: '19060810'
+          tasks_per_node: '1'
+          ntasks: '1'
+          step_gpus: 0,1,2,3
+          prio_process: '0'
+          step_tasks_per_node: '1'
+          cpu_bind_type: 'mask_cpu:'
+          job_uid: '483374'
+          nprocs: '1'
+          nnodes: '1'
+          job_id: '19060810'
+          step_num_tasks: '1'
+          job_start_time: '1776785127'
+        writer_id: du2ovehsjs3un02ufcuqsyjqn7bgc79g
+run_name:
+  desc: null
+  value: coconut-generator-interaction-verifiable-rl
+output_dir:
+  desc: null
+  value: outputs/coconut-generator-interaction-verifiable-rl
+model_id:
+  desc: null
+  value: checkpoints/coconut
+prm_id:
+  desc: null
+  value: checkpoints/latentRM
+objective:
+  desc: null
+  value: verifiable_rl
+train_data_path:
+  desc: null
+  value: data/gsm_train.json
+valid_data_path:
+  desc: null
+  value: data/gsm_valid.json
+model_dtype:
+  desc: null
+  value: bf16
+seed:
+  desc: null
+  value: 42
+num_return_sequences:
+  desc: null
+  value: 8
+latent_length:
+  desc: null
+  value: 6
+max_new_tokens:
+  desc: null
+  value: 128
+communication_type:
+  desc: null
+  value: attention
+communication_attention_heads:
+  desc: null
+  value: 4
+communication_topk:
+  desc: null
+  value: 2
+communication_every:
+  desc: null
+  value: 1
+init_communication_from:
+  desc: null
+  value: ''
+sampling_by:
+  desc: null
+  value: noise
+dropout_p:
+  desc: null
+  value: 0.2
+noise_std:
+  desc: null
+  value: 0.1
+per_device_train_batch_size:
+  desc: null
+  value: 8
+per_device_eval_batch_size:
+  desc: null
+  value: 8
+per_device_forward_batch_size:
+  desc: null
+  value: 2
+gradient_accumulation_steps:
+  desc: null
+  value: 4
+learning_rate:
+  desc: null
+  value: 0.0001
+weight_decay:
+  desc: null
+  value: 0.0
+warmup_ratio:
+  desc: null
+  value: 0.05
+lr_scheduler_type:
+  desc: null
+  value: cosine
+num_train_epochs:
+  desc: null
+  value: 1
+max_train_steps:
+  desc: null
+  value: 1000
+max_grad_norm:
+  desc: null
+  value: 1.0
+logging_steps:
+  desc: null
+  value: 10
+eval_frequency:
+  desc: null
+  value: 4
+eval_on_start:
+  desc: null
+  value: false
+use_wandb:
+  desc: null
+  value: true
+wandb_project:
+  desc: null
+  value: latenttts-generator-interaction
+wandb_entity:
+  desc: null
+  value: ''
+metric_for_best_model:
+  desc: null
+  value: eval_selected_accuracy
+score_temperature:
+  desc: null
+  value: 0.25
+reward_baseline:
+  desc: null
+  value: leave_one_out
+diversity_penalty_weight:
+  desc: null
+  value: 0.1
+anchor_weight:
+  desc: null
+  value: 0.01
+dataloader_num_workers:
+  desc: null
+  value: 0
+sort_by_len:
+  desc: null
+  value: true
+max_train_samples:
+  desc: null
+  value: null
+max_eval_samples:
+  desc: null
+  value: null

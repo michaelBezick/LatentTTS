@@ -854,6 +854,8 @@ class GeneratorInteractionTrainer:
             desc=self.args.run_name,
         )
         running_metrics = {name: 0.0 for name in self.metric_names}
+        accumulation_metrics = {name: 0.0 for name in self.metric_names}
+        accumulation_count = 0
 
         for _ in range(self.num_train_epochs):
             self.generator.eval()
@@ -871,20 +873,25 @@ class GeneratorInteractionTrainer:
                     accumulation_context = self.accelerator.accumulate(self.communication_module)
                 with accumulation_context:
                     metrics = self.backward_batch_objective(batch_inputs)
+                    for name in self.metric_names:
+                        accumulation_metrics[name] += metrics[name].float().item()
+                    accumulation_count += 1
                     if self.accelerator.sync_gradients:
                         grad_params = list(self.communication_module.parameters())
                         if self.args.objective == "verifiable_rl":
                             grad_params.extend(self.prm.parameters())
                         self.accelerator.clip_grad_norm_(grad_params, self.args.max_grad_norm)
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-
-                for name in self.metric_names:
-                    running_metrics[name] += metrics[name].float().item()
+                        self.optimizer.step()
+                        self.lr_scheduler.step()
+                        self.optimizer.zero_grad(set_to_none=True)
 
                 if not self.accelerator.sync_gradients:
                     continue
+
+                for name in self.metric_names:
+                    running_metrics[name] += accumulation_metrics[name] / max(1, accumulation_count)
+                accumulation_metrics = {name: 0.0 for name in self.metric_names}
+                accumulation_count = 0
 
                 self.global_step += 1
                 progress_bar.update(1)
