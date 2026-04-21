@@ -29,12 +29,13 @@ learning_rate: 1.0e-4
 weight_decay: 0.0
 warmup_ratio: 0.05
 lr_scheduler_type: "cosine"
-num_train_epochs: 5
+num_train_epochs: 1
+max_train_steps: 1000
 max_grad_norm: 1.0
 
 logging_steps: 10
-eval_frequency: 1
-eval_on_start: true
+eval_frequency: 4
+eval_on_start: false
 use_wandb: true
 wandb_project: "latenttts-generator-interaction"
 metric_for_best_model: "eval_max_path_score"

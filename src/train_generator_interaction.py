@@ -53,6 +53,7 @@ class GeneratorInteractionConfig:
     warmup_ratio: float = field(default=0.0)
     lr_scheduler_type: str = field(default="cosine")
     num_train_epochs: int = field(default=3)
+    max_train_steps: int | None = field(default=None)
     max_grad_norm: float = field(default=1.0)
     logging_steps: int = field(default=10)
     eval_frequency: int = field(default=1)
@@ -327,13 +328,25 @@ class GeneratorInteractionTrainer:
             weight_decay=args.weight_decay,
         )
 
+        per_process_train_batches = max(
+            1,
+            math.ceil(len(self.train_dataloader) / self.accelerator.num_processes),
+        )
         self.num_update_steps_per_epoch = max(
             1,
-            math.ceil(
-                len(self.train_dataloader) / self.accelerator.gradient_accumulation_steps
-            ),
+            math.ceil(per_process_train_batches / self.accelerator.gradient_accumulation_steps),
         )
-        self.max_train_steps = self.num_update_steps_per_epoch * args.num_train_epochs
+        if args.max_train_steps is not None:
+            if args.max_train_steps <= 0:
+                raise ValueError("max_train_steps must be positive when provided")
+            self.max_train_steps = args.max_train_steps
+            self.num_train_epochs = max(
+                1,
+                math.ceil(self.max_train_steps / self.num_update_steps_per_epoch),
+            )
+        else:
+            self.max_train_steps = self.num_update_steps_per_epoch * args.num_train_epochs
+            self.num_train_epochs = args.num_train_epochs
         self.num_warmup_steps = int(self.max_train_steps * args.warmup_ratio)
         self.lr_scheduler = get_scheduler(
             name=args.lr_scheduler_type,
@@ -635,7 +648,7 @@ class GeneratorInteractionTrainer:
         running_diversity_loss = 0.0
         running_anchor_loss = 0.0
 
-        for _ in range(self.args.num_train_epochs):
+        for _ in range(self.num_train_epochs):
             self.generator.eval()
             for batch in self.train_dataloader:
                 batch_inputs = {
