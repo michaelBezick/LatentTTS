@@ -46,6 +46,7 @@ class GeneratorCommunicationConfig:
     noise_std: float = field(default=0.1)
     per_device_train_batch_size: int = field(default=8)
     per_device_eval_batch_size: int = field(default=8)
+    per_device_forward_batch_size: int | None = field(default=None)
     gradient_accumulation_steps: int = field(default=1)
     learning_rate: float = field(default=1.0e-4)
     weight_decay: float = field(default=0.0)
@@ -400,6 +401,59 @@ class GeneratorCommunicationTrainer:
                 self.wandb_run = wandb.init(**wandb_init_kwargs)
         self.accelerator.wait_for_everyone()
 
+    def iter_forward_batches(self, batch: dict[str, torch.Tensor]):
+        batch_size = batch["input_ids"].shape[0]
+        chunk_size = self.args.per_device_forward_batch_size
+        if chunk_size is None or chunk_size <= 0 or chunk_size >= batch_size:
+            yield batch, batch_size
+            return
+
+        for start in range(0, batch_size, chunk_size):
+            end = min(start + chunk_size, batch_size)
+            yield {key: value[start:end] for key, value in batch.items()}, end - start
+
+    def aggregate_chunk_metrics(self, metric_sums: dict[str, torch.Tensor], batch_size: int):
+        return {key: value / batch_size for key, value in metric_sums.items()}
+
+    def evaluate_batch_objective(self, batch: dict[str, torch.Tensor]):
+        batch_size = batch["input_ids"].shape[0]
+        metric_sums = {
+            "loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "score_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "diversity_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "anchor_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "mean_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "max_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+        }
+
+        for chunk_inputs, chunk_size in self.iter_forward_batches(batch):
+            with self.accelerator.autocast():
+                _, metrics = self.compute_batch_objective(chunk_inputs)
+            for key in metric_sums:
+                metric_sums[key] += metrics[key].detach().float() * chunk_size
+
+        return self.aggregate_chunk_metrics(metric_sums, batch_size)
+
+    def backward_batch_objective(self, batch: dict[str, torch.Tensor]):
+        batch_size = batch["input_ids"].shape[0]
+        metric_sums = {
+            "loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "score_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "diversity_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "anchor_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "mean_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+            "max_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
+        }
+
+        for chunk_inputs, chunk_size in self.iter_forward_batches(batch):
+            with self.accelerator.autocast():
+                loss, metrics = self.compute_batch_objective(chunk_inputs)
+            self.accelerator.backward(loss * (chunk_size / batch_size))
+            for key in metric_sums:
+                metric_sums[key] += metrics[key].detach().float() * chunk_size
+
+        return self.aggregate_chunk_metrics(metric_sums, batch_size)
+
     def log_wandb(self, metrics: dict[str, float], step: int | None = None):
         if not self.accelerator.is_main_process or self.wandb_run is None:
             return
@@ -479,8 +533,7 @@ class GeneratorCommunicationTrainer:
                 if k in {"input_ids", "attention_mask"}
             }
             with torch.no_grad():
-                with self.accelerator.autocast():
-                    _, metrics = self.compute_batch_objective(batch_inputs)
+                metrics = self.evaluate_batch_objective(batch_inputs)
             batch_size = batch_inputs["input_ids"].shape[0]
             metric_sums += torch.tensor(
                 [
@@ -591,9 +644,7 @@ class GeneratorCommunicationTrainer:
                     if k in {"input_ids", "attention_mask"}
                 }
                 with self.accelerator.accumulate(self.communication_module):
-                    with self.accelerator.autocast():
-                        loss, metrics = self.compute_batch_objective(batch_inputs)
-                    self.accelerator.backward(loss)
+                    metrics = self.backward_batch_objective(batch_inputs)
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(
                             self.accelerator.unwrap_model(
