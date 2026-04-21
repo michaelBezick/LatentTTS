@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 #SBATCH --output=logs/slurm/%x-%j.out
-#SBATCH --error=logs/slurm/%x-%j.err
 
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_train_generator_comm.sh}"
 TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_generator_attention.yaml}"

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 #SBATCH --output=logs/slurm/%x-%j.out
-#SBATCH --error=logs/slurm/%x-%j.err
 
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_annotation.sh}"
 ANNOTATION_SCRIPT="${ANNOTATION_SCRIPT:-run_annotation.sh}"

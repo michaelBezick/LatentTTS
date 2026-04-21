@@ -51,7 +51,6 @@ if [[ "${NUM_SHARDS}" -gt 1 ]]; then
             "${sbatch_args[@]}" \
             "--job-name=latenttts-annotate-shard${IDX}" \
             "--output=${LOG_DIR}/latenttts-annotate-shard${IDX}-%j.out" \
-            "--error=${LOG_DIR}/latenttts-annotate-shard${IDX}-%j.err" \
             "${SCRIPT_DIR}/run_annotation.sbatch"
     done
 else
@@ -60,6 +59,5 @@ else
         "${sbatch_args[@]}" \
         "--job-name=latenttts-annotate" \
         "--output=${LOG_DIR}/latenttts-annotate-%j.out" \
-        "--error=${LOG_DIR}/latenttts-annotate-%j.err" \
         "${SCRIPT_DIR}/run_annotation.sbatch"
 fi

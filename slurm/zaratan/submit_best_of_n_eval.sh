@@ -40,7 +40,6 @@ sbatch_args=(
     "--time=${TIME_LIMIT}"
     "--mem=${MEMORY}"
     "--output=${LOG_DIR}/%x-%j.out"
-    "--error=${LOG_DIR}/%x-%j.err"
     "--export=ALL"
 )
 
