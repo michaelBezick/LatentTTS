@@ -524,7 +524,9 @@ class GeneratorInteractionTrainer:
             torch.where(input_ids == self.latent_id, 0, input_ids)
         )
         inputs_embeds = inputs_embeds.clone()
-        inputs_embeds[latent_mask] = rollout.latent_thoughts.detach().reshape(-1, inputs_embeds.shape[-1])
+        inputs_embeds[latent_mask] = rollout.latent_thoughts.detach().to(
+            dtype=inputs_embeds.dtype
+        ).reshape(-1, inputs_embeds.shape[-1])
 
         with torch.no_grad():
             output = self.generator.generate(
