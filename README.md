@@ -160,7 +160,7 @@ Other maintained wrappers:
 
 ### Experimental verifiable-reward RL
 
-The repo also includes a first-pass verifiable-reward RL objective that still freezes the base generator and trains only the generator-side interaction module.
+The repo also includes a verifiable-reward RL objective that freezes the base generator, trains the generator-side interaction module, and jointly trains the latent RM scorer as the path-selection gate.
 
 Training config:
 
@@ -169,20 +169,20 @@ accelerate launch -m src.train_generator_interaction \
   training_args/train_coconut_generator_interaction_verifiable_rl.yaml
 ```
 
-RM-free eval wrapper for the resulting checkpoints:
+Selected-response eval for the resulting checkpoints:
 
 ```bash
 ACCOUNT=<your_account> \
 PARTITION=<your_partition> \
 QOS=<your_qos> \
-SAMPLING_BY=noise \
-NOISE_STD=0.1 \
+PRM_ID=outputs/coconut-generator-interaction-verifiable-rl/best/prm \
 GENERATOR_INTERACTION_TYPE=attention \
 GENERATOR_INTERACTION_CHECKPOINT=outputs/coconut-generator-interaction-verifiable-rl/best \
-./slurm/zaratan/submit_generator_interaction_eval_rm_free.sh
+RM_INTERACTION_TYPE=none \
+./slurm/zaratan/submit_generator_interaction_eval.sh
 ```
 
-This RM-free eval reports coverage and majority-vote selected accuracy without using the latent RM.
+RM-free coverage / voting eval is still available via `./slurm/zaratan/submit_generator_interaction_eval_rm_free.sh`, but the primary selected-response metric for RL checkpoints should use the saved scorer checkpoint under `best/prm`.
 
 ## Experimental Workflows
 

@@ -292,19 +292,20 @@ class GeneratorInteractionTrainer:
         if args.sampling_by == "dropout":
             set_dropout_p(self.generator, args.dropout_p)
 
-        self.prm = None
-        if args.objective == "prm":
-            self.prm = COCONUTGPT2ForTokenClassification.from_pretrained(
-                args.prm_id,
-                latent_id=self.latent_id,
-                latent_start_id=self.start_id,
-                latent_end_id=self.end_id,
-                pad_token_id=self.tokenizer.pad_token_id,
-                torch_dtype=self.torch_dtype,
-            )
-            self.prm.config.use_cache = False
-            for param in self.prm.parameters():
-                param.requires_grad = False
+        self.prm = COCONUTGPT2ForTokenClassification.from_pretrained(
+            args.prm_id,
+            latent_id=self.latent_id,
+            latent_start_id=self.start_id,
+            latent_end_id=self.end_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            torch_dtype=self.torch_dtype,
+        )
+        self.prm.config.use_cache = False
+        for param in self.prm.parameters():
+            param.requires_grad = args.objective == "verifiable_rl"
+        if args.objective == "verifiable_rl":
+            self.prm.train()
+        else:
             self.prm.eval()
         self.verifiable_generation_config = LatentGenerationConfig(
             max_new_tokens=args.max_new_tokens,
@@ -353,6 +354,8 @@ class GeneratorInteractionTrainer:
         trainable_params = [
             param for param in self.communication_module.parameters() if param.requires_grad
         ]
+        if args.objective == "verifiable_rl":
+            trainable_params.extend(param for param in self.prm.parameters() if param.requires_grad)
         if len(trainable_params) == 0:
             raise ValueError("No trainable generator interaction parameters found")
         self.optimizer = AdamW(
@@ -389,33 +392,65 @@ class GeneratorInteractionTrainer:
         )
 
         if self.eval_dataloader is None:
-            (
-                self.communication_module,
-                self.optimizer,
-                self.train_dataloader,
-                self.lr_scheduler,
-            ) = self.accelerator.prepare(
-                self.communication_module,
-                self.optimizer,
-                self.train_dataloader,
-                self.lr_scheduler,
-            )
+            if args.objective == "verifiable_rl":
+                (
+                    self.communication_module,
+                    self.prm,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.lr_scheduler,
+                ) = self.accelerator.prepare(
+                    self.communication_module,
+                    self.prm,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.lr_scheduler,
+                )
+            else:
+                (
+                    self.communication_module,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.lr_scheduler,
+                ) = self.accelerator.prepare(
+                    self.communication_module,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.lr_scheduler,
+                )
         else:
-            (
-                self.communication_module,
-                self.optimizer,
-                self.train_dataloader,
-                self.eval_dataloader,
-                self.lr_scheduler,
-            ) = self.accelerator.prepare(
-                self.communication_module,
-                self.optimizer,
-                self.train_dataloader,
-                self.eval_dataloader,
-                self.lr_scheduler,
-            )
+            if args.objective == "verifiable_rl":
+                (
+                    self.communication_module,
+                    self.prm,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.eval_dataloader,
+                    self.lr_scheduler,
+                ) = self.accelerator.prepare(
+                    self.communication_module,
+                    self.prm,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.eval_dataloader,
+                    self.lr_scheduler,
+                )
+            else:
+                (
+                    self.communication_module,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.eval_dataloader,
+                    self.lr_scheduler,
+                ) = self.accelerator.prepare(
+                    self.communication_module,
+                    self.optimizer,
+                    self.train_dataloader,
+                    self.eval_dataloader,
+                    self.lr_scheduler,
+                )
         self.generator = self.generator.to(self.accelerator.device)
-        if self.prm is not None:
+        if self.prm is not None and args.objective != "verifiable_rl":
             self.prm = self.prm.to(self.accelerator.device)
         self.diversity_loss_fct = DiversityPenaltyLoss()
         self.metric_names = self.get_metric_names()
@@ -459,6 +494,7 @@ class GeneratorInteractionTrainer:
             return [
                 "loss",
                 "policy_loss",
+                "selector_loss",
                 "diversity_loss",
                 "anchor_loss",
                 "mean_reward",
@@ -513,10 +549,29 @@ class GeneratorInteractionTrainer:
         baselines = (rewards.sum(dim=1, keepdim=True) - rewards) / (self.args.num_return_sequences - 1)
         return rewards - baselines
 
+    def compute_selector_scores(
+        self,
+        rollout: LatentRolloutOutput,
+        detach_latents: bool,
+    ) -> torch.Tensor:
+        latent_embeds = rollout.latent_thoughts.detach() if detach_latents else rollout.latent_thoughts
+        prm_outputs = self.prm(
+            input_ids=rollout.input_ids,
+            attention_mask=rollout.attention_mask,
+            latent_embeds=latent_embeds,
+            use_cache=False,
+            return_dict=True,
+        )
+        prm_scores = prm_outputs.logits.squeeze(-1)
+        latent_mask = rollout.input_ids == self.latent_id
+        prm_scores = torch.where(latent_mask, prm_scores, 0).sum(dim=-1)
+        return prm_scores.view(-1, self.args.num_return_sequences)
+
     def evaluate_verifiable_rewards(
         self,
         batch: dict[str, torch.Tensor],
         rollout: LatentRolloutOutput,
+        selector_scores: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         input_ids = rollout.input_ids
         latent_mask = input_ids == self.latent_id
@@ -560,11 +615,16 @@ class GeneratorInteractionTrainer:
             device=self.accelerator.device,
             dtype=torch.float32,
         ).mean()
+        if selector_scores is None:
+            selected_accuracy = voting_accuracy
+        else:
+            selected_indices = selector_scores.argmax(dim=1, keepdim=True)
+            selected_accuracy = rewards.gather(1, selected_indices).mean()
         reward_metrics = {
             "mean_reward": rewards.mean(),
             "coverage": rewards.max(dim=1).values.mean(),
             "voting_accuracy": voting_accuracy,
-            "selected_accuracy": voting_accuracy,
+            "selected_accuracy": selected_accuracy,
         }
         return rewards, reward_metrics
 
@@ -631,14 +691,22 @@ class GeneratorInteractionTrainer:
                 * self.args.score_temperature
             ).mean()
         else:
-            rewards, reward_metrics = self.evaluate_verifiable_rewards(batch, rollout)
+            selector_scores = self.compute_selector_scores(rollout, detach_latents=True)
+            rewards, reward_metrics = self.evaluate_verifiable_rewards(
+                batch,
+                rollout,
+                selector_scores=selector_scores,
+            )
             advantages = self.compute_reward_advantages(rewards).detach()
             log_probs = gaussian_latent_log_probs(
                 samples=rollout.latent_thoughts,
                 means=rollout.post_communication_latent_thoughts,
                 std=self.args.noise_std,
             ).view(-1, self.args.num_return_sequences)
-            objective_loss = -(advantages * log_probs).mean()
+            policy_loss = -(advantages * log_probs).mean()
+            selector_probs = torch.softmax(selector_scores / self.args.score_temperature, dim=1)
+            selector_loss = -((selector_probs * rewards).sum(dim=1)).mean()
+            objective_loss = policy_loss + selector_loss
         diversity_loss = objective_loss.new_zeros(())
         if self.args.diversity_penalty_weight > 0 and self.args.num_return_sequences > 1:
             diversity_loss = self.diversity_loss_fct(
@@ -668,7 +736,8 @@ class GeneratorInteractionTrainer:
         else:
             metrics = {
                 "loss": total_loss.detach(),
-                "policy_loss": objective_loss.detach(),
+                "policy_loss": policy_loss.detach(),
+                "selector_loss": selector_loss.detach(),
                 "diversity_loss": diversity_loss.detach(),
                 "anchor_loss": anchor_loss.detach(),
                 **{key: value.detach() for key, value in reward_metrics.items()},
@@ -720,6 +789,13 @@ class GeneratorInteractionTrainer:
             ).state_dict().items()
         }
         save_file(state_dict, os.path.join(checkpoint_dir, "model.safetensors"))
+        if self.args.objective == "verifiable_rl":
+            prm_checkpoint_dir = os.path.join(checkpoint_dir, "prm")
+            os.makedirs(prm_checkpoint_dir, exist_ok=True)
+            self.accelerator.unwrap_model(self.prm).save_pretrained(
+                prm_checkpoint_dir,
+                safe_serialization=True,
+            )
         with open(
             os.path.join(checkpoint_dir, "communication_config.json"),
             "w",
@@ -739,6 +815,7 @@ class GeneratorInteractionTrainer:
                     "dropout_p": self.args.dropout_p,
                     "noise_std": self.args.noise_std,
                     "reward_baseline": self.args.reward_baseline,
+                    "selector_checkpoint": "prm" if self.args.objective == "verifiable_rl" else None,
                 },
                 f,
                 indent=2,
@@ -780,17 +857,25 @@ class GeneratorInteractionTrainer:
 
         for _ in range(self.num_train_epochs):
             self.generator.eval()
+            if self.args.objective == "verifiable_rl":
+                self.prm.train()
             for batch in self.train_dataloader:
                 batch_inputs = self.prepare_batch_inputs(batch)
-                with self.accelerator.accumulate(self.communication_module):
+                if self.args.objective == "verifiable_rl":
+                    self.prm.train()
+                    accumulation_context = self.accelerator.accumulate(
+                        self.communication_module,
+                        self.prm,
+                    )
+                else:
+                    accumulation_context = self.accelerator.accumulate(self.communication_module)
+                with accumulation_context:
                     metrics = self.backward_batch_objective(batch_inputs)
                     if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(
-                            self.accelerator.unwrap_model(
-                                self.communication_module
-                            ).parameters(),
-                            self.args.max_grad_norm,
-                        )
+                        grad_params = list(self.communication_module.parameters())
+                        if self.args.objective == "verifiable_rl":
+                            grad_params.extend(self.prm.parameters())
+                        self.accelerator.clip_grad_norm_(grad_params, self.args.max_grad_norm)
                     self.optimizer.step()
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
