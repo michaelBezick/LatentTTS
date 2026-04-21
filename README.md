@@ -156,6 +156,33 @@ Other maintained wrappers:
 - `./slurm/zaratan/submit_train.sh` for experimental RM-side interaction training
 - `./slurm/zaratan/submit_best_of_n_eval.sh` for experimental RM-side reranking eval
 - `./slurm/zaratan/submit_mode_collapse_ablation.sh` for experimental collapse analysis
+- `./slurm/zaratan/submit_generator_interaction_eval_rm_free.sh` for RM-free generator-side eval
+
+### Experimental verifiable-reward RL
+
+The repo also includes a first-pass verifiable-reward RL objective that still freezes the base generator and trains only the generator-side interaction module.
+
+Training config:
+
+```bash
+accelerate launch -m src.train_generator_interaction \
+  training_args/train_coconut_generator_interaction_verifiable_rl.yaml
+```
+
+RM-free eval wrapper for the resulting checkpoints:
+
+```bash
+ACCOUNT=<your_account> \
+PARTITION=<your_partition> \
+QOS=<your_qos> \
+SAMPLING_BY=noise \
+NOISE_STD=0.1 \
+GENERATOR_INTERACTION_TYPE=attention \
+GENERATOR_INTERACTION_CHECKPOINT=outputs/coconut-generator-interaction-verifiable-rl/best \
+./slurm/zaratan/submit_generator_interaction_eval_rm_free.sh
+```
+
+This RM-free eval reports coverage and majority-vote selected accuracy without using the latent RM.
 
 ## Experimental Workflows
 

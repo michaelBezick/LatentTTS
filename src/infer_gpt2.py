@@ -15,7 +15,11 @@ from fire import Fire
 
 from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
 from .model_registry import MODELS
-from .utils import pass_at_k_mean, InferenceCollator
+from .models.communication import (
+    build_communication_module,
+    restore_communication_module_from_checkpoint,
+)
+from .utils import pass_at_k_mean, InferenceCollator, set_seed
 
 
 @torch.no_grad()
@@ -31,9 +35,16 @@ def main(
     sampling_by: Literal["dropout", "noise"] = "dropout",
     noise_std: float | None = None,
     dropout_p: float | None = None,
+    generator_communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    generator_communication_checkpoint: str = "",
+    generator_communication_attention_heads: int = 4,
+    generator_communication_topk: int = 2,
+    generator_communication_every: int = 1,
+    seed: int = 200,
 ):
     new_line_after_input = model_type == "coconut"
     model_id = MODELS[model_type]["id"]
+    set_seed(seed)
     accelerator = Accelerator()
     accelerator.wait_for_everyone()
 
@@ -68,6 +79,8 @@ def main(
         latent_do_sample_by=sampling_by if do_sample else None,
         noise_std=noise_std,
         dropout_p=dropout_p,
+        communication_type=generator_communication_type,
+        communication_every=generator_communication_every,
         pad_token_id=processing_class.pad_token_id,
         eos_token_id=processing_class.eos_token_id,
         bos_token_id=processing_class.bos_token_id,
@@ -87,6 +100,23 @@ def main(
             torch.bfloat16 if model_dtype == "bf16" else (torch.float16 if model_dtype == "fp16" else None)
         ),
     )
+    if generator_communication_type != "none":
+        model.communication_module = build_communication_module(
+            communication_type=generator_communication_type,
+            d_model=model.config.hidden_size,
+            n_heads=generator_communication_attention_heads,
+            topk=generator_communication_topk,
+        )
+        if generator_communication_checkpoint:
+            restored = restore_communication_module_from_checkpoint(
+                module_owner=model,
+                checkpoint_path=generator_communication_checkpoint,
+            )
+            if not restored:
+                raise ValueError(
+                    f"Could not restore generator interaction module from {generator_communication_checkpoint}"
+                )
+        model.communication_module = model.communication_module.to(device=model.device, dtype=model.dtype)
 
     dataset = datasets.Dataset.from_json(data_path)
     postfix = "\n<|start-latent|>" if new_line_after_input else "<|start-latent|>"
@@ -161,7 +191,9 @@ def main(
         accuracies = {idx: value for d in accuracies for idx, value in d.items()}
 
     if accelerator.is_main_process:
+        print(f"SEED={seed}")
         corrects = np.array(list(corrects.values()))
+        coverage = float(np.array([row.any() for row in corrects]).mean())
 
         root_n_samples = int(np.sqrt(n_samples))
         ks = [2**i for i in range(root_n_samples + 1) if 2**i <= n_samples]
@@ -170,7 +202,9 @@ def main(
             print(f"Pass@{k}: {score*100:.4f}")
 
         accuracies = np.array(list(accuracies.values())).mean()
-        print(f"Voting Accuracy: {accuracies*100:.4f}")
+        print(f"Coverage: {coverage*100:.4f}%")
+        print(f"Voting Accuracy: {accuracies*100:.4f}%")
+        print(f"Selected Accuracy: {accuracies*100:.4f}%")
 
 
 if __name__ == "__main__":

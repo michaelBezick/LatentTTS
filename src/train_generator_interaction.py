@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -14,6 +15,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser, get_scheduler
 
+from src.generation_mixin import LatentGenerationConfig
+from src.model_registry import MODELS
 from src.models.coconut import COCONUTGPT2
 from src.models.gpt2 import COCONUTGPT2ForTokenClassification
 from src.models.communication import (
@@ -30,12 +33,14 @@ class GeneratorInteractionConfig:
     output_dir: str = field(default="outputs/coconut-generator-interaction")
     model_id: str = field(default="checkpoints/coconut")
     prm_id: str = field(default="checkpoints/latentRM")
+    objective: Literal["prm", "verifiable_rl"] = field(default="prm")
     train_data_path: str = field(default="data/gsm_train.json")
     valid_data_path: str = field(default="data/gsm_valid.json")
     model_dtype: Literal["fp32", "fp16", "bf16"] = field(default="bf16")
     seed: int = field(default=42)
     num_return_sequences: int = field(default=8)
     latent_length: int = field(default=6)
+    max_new_tokens: int = field(default=128)
     communication_type: Literal["mean", "attention", "router"] = field(default="attention")
     communication_attention_heads: int = field(default=4)
     communication_topk: int = field(default=2)
@@ -61,10 +66,9 @@ class GeneratorInteractionConfig:
     use_wandb: bool = field(default=False)
     wandb_project: str = field(default="latenttts-generator-interaction")
     wandb_entity: str = field(default="")
-    metric_for_best_model: Literal["eval_loss", "eval_max_path_score"] = field(
-        default="eval_max_path_score"
-    )
+    metric_for_best_model: str = field(default="eval_max_path_score")
     score_temperature: float = field(default=0.25)
+    reward_baseline: Literal["leave_one_out", "group_mean"] = field(default="leave_one_out")
     diversity_penalty_weight: float = field(default=0.1)
     anchor_weight: float = field(default=0.01)
     dataloader_num_workers: int = field(default=0)
@@ -80,6 +84,18 @@ class LatentRolloutOutput:
     latent_thoughts: torch.FloatTensor
     pre_communication_latent_thoughts: torch.FloatTensor
     post_communication_latent_thoughts: torch.FloatTensor
+
+
+def gaussian_latent_log_probs(
+    samples: torch.Tensor,
+    means: torch.Tensor,
+    std: float,
+) -> torch.Tensor:
+    if std <= 0:
+        raise ValueError(f"noise_std must be positive for verifiable RL, but got {std}")
+    normalized = (samples.detach().float() - means.float()) / std
+    log_normalizer = math.log(std) + 0.5 * math.log(2.0 * math.pi)
+    return (-0.5 * normalized.pow(2) - log_normalizer).mean(dim=(-1, -2))
 
 
 def parse_args(*args, **kwargs) -> GeneratorInteractionConfig:
@@ -228,6 +244,7 @@ class GeneratorInteractionTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(args.model_id)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.answer_extractor = MODELS["coconut"]["answer_extractor"]
         self.latent_id = self.tokenizer.convert_tokens_to_ids("<|latent|>")
         self.start_id = self.tokenizer.convert_tokens_to_ids("<|start-latent|>")
         self.end_id = self.tokenizer.convert_tokens_to_ids("<|end-latent|>")
@@ -235,6 +252,11 @@ class GeneratorInteractionTrainer:
             raise ValueError(
                 f"latent_id={self.latent_id}, start_id={self.start_id}, end_id={self.end_id} must all differ"
             )
+        if args.objective == "verifiable_rl":
+            if args.sampling_by != "noise":
+                raise ValueError("verifiable_rl requires sampling_by='noise' so latent log-probs are defined")
+            if args.num_return_sequences <= 1:
+                raise ValueError("verifiable_rl requires num_return_sequences > 1")
 
         self.generator = COCONUTGPT2.from_pretrained(
             args.model_id,
@@ -270,18 +292,29 @@ class GeneratorInteractionTrainer:
         if args.sampling_by == "dropout":
             set_dropout_p(self.generator, args.dropout_p)
 
-        self.prm = COCONUTGPT2ForTokenClassification.from_pretrained(
-            args.prm_id,
-            latent_id=self.latent_id,
-            latent_start_id=self.start_id,
-            latent_end_id=self.end_id,
+        self.prm = None
+        if args.objective == "prm":
+            self.prm = COCONUTGPT2ForTokenClassification.from_pretrained(
+                args.prm_id,
+                latent_id=self.latent_id,
+                latent_start_id=self.start_id,
+                latent_end_id=self.end_id,
+                pad_token_id=self.tokenizer.pad_token_id,
+                torch_dtype=self.torch_dtype,
+            )
+            self.prm.config.use_cache = False
+            for param in self.prm.parameters():
+                param.requires_grad = False
+            self.prm.eval()
+        self.verifiable_generation_config = LatentGenerationConfig(
+            max_new_tokens=args.max_new_tokens,
+            latent_length=args.latent_length,
+            latent_do_sample=False,
+            communication_type="none",
             pad_token_id=self.tokenizer.pad_token_id,
-            torch_dtype=self.torch_dtype,
+            eos_token_id=self.tokenizer.eos_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
         )
-        self.prm.config.use_cache = False
-        for param in self.prm.parameters():
-            param.requires_grad = False
-        self.prm.eval()
 
         self.data_collator = InferenceCollator(self.tokenizer)
         train_dataset = prepare_coconut_dataset(
@@ -382,8 +415,15 @@ class GeneratorInteractionTrainer:
                 self.lr_scheduler,
             )
         self.generator = self.generator.to(self.accelerator.device)
-        self.prm = self.prm.to(self.accelerator.device)
+        if self.prm is not None:
+            self.prm = self.prm.to(self.accelerator.device)
         self.diversity_loss_fct = DiversityPenaltyLoss()
+        self.metric_names = self.get_metric_names()
+        if args.metric_for_best_model not in {f"eval_{name}" for name in self.metric_names}:
+            raise ValueError(
+                f"metric_for_best_model={args.metric_for_best_model} is not supported for objective={args.objective}. "
+                f"Available metrics: {[f'eval_{name}' for name in self.metric_names]}"
+            )
         self.best_metric = None
         self.global_step = 0
         self.wandb_run = None
@@ -414,6 +454,45 @@ class GeneratorInteractionTrainer:
                 self.wandb_run = wandb.init(**wandb_init_kwargs)
         self.accelerator.wait_for_everyone()
 
+    def get_metric_names(self) -> list[str]:
+        if self.args.objective == "verifiable_rl":
+            return [
+                "loss",
+                "policy_loss",
+                "diversity_loss",
+                "anchor_loss",
+                "mean_reward",
+                "coverage",
+                "voting_accuracy",
+                "selected_accuracy",
+            ]
+        return [
+            "loss",
+            "score_loss",
+            "diversity_loss",
+            "anchor_loss",
+            "mean_path_score",
+            "max_path_score",
+        ]
+
+    def init_metric_sums(self) -> dict[str, torch.Tensor]:
+        return {
+            name: torch.zeros((), device=self.accelerator.device, dtype=torch.float32)
+            for name in self.metric_names
+        }
+
+    def prepare_batch_inputs(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        batch_inputs = {}
+        for key in ["input_ids", "attention_mask", "answer"]:
+            if key not in batch:
+                continue
+            value = batch[key]
+            if isinstance(value, torch.Tensor):
+                batch_inputs[key] = value.to(self.accelerator.device)
+            else:
+                batch_inputs[key] = value
+        return batch_inputs
+
     def iter_forward_batches(self, batch: dict[str, torch.Tensor]):
         batch_size = batch["input_ids"].shape[0]
         chunk_size = self.args.per_device_forward_batch_size
@@ -428,16 +507,68 @@ class GeneratorInteractionTrainer:
     def aggregate_chunk_metrics(self, metric_sums: dict[str, torch.Tensor], batch_size: int):
         return {key: value / batch_size for key, value in metric_sums.items()}
 
+    def compute_reward_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
+        if self.args.reward_baseline == "group_mean":
+            return rewards - rewards.mean(dim=1, keepdim=True)
+        baselines = (rewards.sum(dim=1, keepdim=True) - rewards) / (self.args.num_return_sequences - 1)
+        return rewards - baselines
+
+    def evaluate_verifiable_rewards(
+        self,
+        batch: dict[str, torch.Tensor],
+        rollout: LatentRolloutOutput,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        input_ids = rollout.input_ids
+        latent_mask = input_ids == self.latent_id
+        inputs_embeds = self.generator.get_input_embeddings()(
+            torch.where(input_ids == self.latent_id, 0, input_ids)
+        )
+        inputs_embeds = inputs_embeds.clone()
+        inputs_embeds[latent_mask] = rollout.latent_thoughts.detach().reshape(-1, inputs_embeds.shape[-1])
+
+        with torch.no_grad():
+            output = self.generator.generate(
+                input_ids=input_ids,
+                attention_mask=rollout.attention_mask,
+                inputs_embeds=inputs_embeds,
+                generation_config=self.verifiable_generation_config,
+                num_return_sequences=1,
+                use_cache=True,
+            )
+
+        continuation = output[:, input_ids.shape[1] :]
+        text_output = self.tokenizer.batch_decode(continuation, skip_special_tokens=True)
+        extracted_answers = [self.answer_extractor(text) for text in text_output]
+        rewards = torch.tensor(
+            [
+                extracted_answers[i] == batch["answer"][i // self.args.num_return_sequences]
+                for i in range(len(extracted_answers))
+            ],
+            device=self.accelerator.device,
+            dtype=torch.float32,
+        ).view(-1, self.args.num_return_sequences)
+        voting_result = []
+        for group_idx in range(rewards.shape[0]):
+            start = group_idx * self.args.num_return_sequences
+            end = start + self.args.num_return_sequences
+            selected_answer = Counter(extracted_answers[start:end]).most_common(1)[0][0]
+            voting_result.append(selected_answer == batch["answer"][group_idx])
+        voting_accuracy = torch.tensor(
+            voting_result,
+            device=self.accelerator.device,
+            dtype=torch.float32,
+        ).mean()
+        reward_metrics = {
+            "mean_reward": rewards.mean(),
+            "coverage": rewards.max(dim=1).values.mean(),
+            "voting_accuracy": voting_accuracy,
+            "selected_accuracy": voting_accuracy,
+        }
+        return rewards, reward_metrics
+
     def evaluate_batch_objective(self, batch: dict[str, torch.Tensor]):
         batch_size = batch["input_ids"].shape[0]
-        metric_sums = {
-            "loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "score_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "diversity_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "anchor_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "mean_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "max_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-        }
+        metric_sums = self.init_metric_sums()
 
         for chunk_inputs, chunk_size in self.iter_forward_batches(batch):
             with self.accelerator.autocast():
@@ -449,14 +580,7 @@ class GeneratorInteractionTrainer:
 
     def backward_batch_objective(self, batch: dict[str, torch.Tensor]):
         batch_size = batch["input_ids"].shape[0]
-        metric_sums = {
-            "loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "score_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "diversity_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "anchor_loss": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "mean_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-            "max_path_score": torch.zeros((), device=self.accelerator.device, dtype=torch.float32),
-        }
+        metric_sums = self.init_metric_sums()
 
         for chunk_inputs, chunk_size in self.iter_forward_batches(batch):
             with self.accelerator.autocast():
@@ -488,75 +612,83 @@ class GeneratorInteractionTrainer:
             noise_std=self.args.noise_std,
             communication_every=self.args.communication_every,
         )
-        prm_outputs = self.prm(
-            input_ids=rollout.input_ids,
-            attention_mask=rollout.attention_mask,
-            latent_embeds=rollout.latent_thoughts,
-            use_cache=False,
-            return_dict=True,
-        )
-        prm_scores = prm_outputs.logits.squeeze(-1)
-        latent_mask = rollout.input_ids == self.latent_id
-        prm_scores = torch.where(latent_mask, prm_scores, 0).sum(dim=-1)
-        prm_scores = prm_scores.view(-1, self.args.num_return_sequences)
-
-        score_loss = -(
-            torch.logsumexp(prm_scores / self.args.score_temperature, dim=1)
-            * self.args.score_temperature
-        ).mean()
-        diversity_loss = prm_scores.new_zeros(())
+        if self.args.objective == "prm":
+            prm_outputs = self.prm(
+                input_ids=rollout.input_ids,
+                attention_mask=rollout.attention_mask,
+                latent_embeds=rollout.latent_thoughts,
+                use_cache=False,
+                return_dict=True,
+            )
+            prm_scores = prm_outputs.logits.squeeze(-1)
+            latent_mask = rollout.input_ids == self.latent_id
+            prm_scores = torch.where(latent_mask, prm_scores, 0).sum(dim=-1)
+            prm_scores = prm_scores.view(-1, self.args.num_return_sequences)
+            objective_loss = -(
+                torch.logsumexp(prm_scores / self.args.score_temperature, dim=1)
+                * self.args.score_temperature
+            ).mean()
+        else:
+            rewards, reward_metrics = self.evaluate_verifiable_rewards(batch, rollout)
+            advantages = self.compute_reward_advantages(rewards).detach()
+            log_probs = gaussian_latent_log_probs(
+                samples=rollout.latent_thoughts,
+                means=rollout.post_communication_latent_thoughts,
+                std=self.args.noise_std,
+            ).view(-1, self.args.num_return_sequences)
+            objective_loss = -(advantages * log_probs).mean()
+        diversity_loss = objective_loss.new_zeros(())
         if self.args.diversity_penalty_weight > 0 and self.args.num_return_sequences > 1:
             diversity_loss = self.diversity_loss_fct(
                 rollout.post_communication_latent_thoughts,
                 self.args.num_return_sequences,
             )
-        anchor_loss = prm_scores.new_zeros(())
+        anchor_loss = diversity_loss.new_zeros(())
         if self.args.anchor_weight > 0:
             anchor_loss = F.mse_loss(
                 rollout.post_communication_latent_thoughts,
                 rollout.pre_communication_latent_thoughts.detach(),
             )
 
-        total_loss = score_loss
+        total_loss = objective_loss
         total_loss = total_loss + self.args.diversity_penalty_weight * diversity_loss
         total_loss = total_loss + self.args.anchor_weight * anchor_loss
 
-        metrics = {
-            "loss": total_loss.detach(),
-            "score_loss": score_loss.detach(),
-            "diversity_loss": diversity_loss.detach(),
-            "anchor_loss": anchor_loss.detach(),
-            "mean_path_score": prm_scores.mean().detach(),
-            "max_path_score": prm_scores.max(dim=1).values.mean().detach(),
-        }
+        if self.args.objective == "prm":
+            metrics = {
+                "loss": total_loss.detach(),
+                "score_loss": objective_loss.detach(),
+                "diversity_loss": diversity_loss.detach(),
+                "anchor_loss": anchor_loss.detach(),
+                "mean_path_score": prm_scores.mean().detach(),
+                "max_path_score": prm_scores.max(dim=1).values.mean().detach(),
+            }
+        else:
+            metrics = {
+                "loss": total_loss.detach(),
+                "policy_loss": objective_loss.detach(),
+                "diversity_loss": diversity_loss.detach(),
+                "anchor_loss": anchor_loss.detach(),
+                **{key: value.detach() for key, value in reward_metrics.items()},
+            }
         return total_loss, metrics
 
     def evaluate(self) -> dict[str, float]:
         if self.eval_dataloader is None:
             return {}
 
-        metric_sums = torch.zeros(6, device=self.accelerator.device, dtype=torch.float32)
+        metric_sums = torch.zeros(len(self.metric_names), device=self.accelerator.device, dtype=torch.float32)
         count = torch.zeros(1, device=self.accelerator.device, dtype=torch.float32)
         self.generator.eval()
-        self.prm.eval()
+        if self.prm is not None:
+            self.prm.eval()
         for batch in self.eval_dataloader:
-            batch_inputs = {
-                k: v.to(self.accelerator.device)
-                for k, v in batch.items()
-                if k in {"input_ids", "attention_mask"}
-            }
+            batch_inputs = self.prepare_batch_inputs(batch)
             with torch.no_grad():
                 metrics = self.evaluate_batch_objective(batch_inputs)
             batch_size = batch_inputs["input_ids"].shape[0]
             metric_sums += torch.tensor(
-                [
-                    metrics["loss"].float().item() * batch_size,
-                    metrics["score_loss"].float().item() * batch_size,
-                    metrics["diversity_loss"].float().item() * batch_size,
-                    metrics["anchor_loss"].float().item() * batch_size,
-                    metrics["mean_path_score"].float().item() * batch_size,
-                    metrics["max_path_score"].float().item() * batch_size,
-                ],
+                [metrics[name].float().item() * batch_size for name in self.metric_names],
                 device=self.accelerator.device,
             )
             count += batch_size
@@ -565,12 +697,8 @@ class GeneratorInteractionTrainer:
         count = self.accelerator.reduce(count, reduction="sum")
         count_value = max(count.item(), 1.0)
         return {
-            "eval_loss": (metric_sums[0] / count_value).item(),
-            "eval_score_loss": (metric_sums[1] / count_value).item(),
-            "eval_diversity_loss": (metric_sums[2] / count_value).item(),
-            "eval_anchor_loss": (metric_sums[3] / count_value).item(),
-            "eval_mean_path_score": (metric_sums[4] / count_value).item(),
-            "eval_max_path_score": (metric_sums[5] / count_value).item(),
+            f"eval_{name}": (metric_sums[idx] / count_value).item()
+            for idx, name in enumerate(self.metric_names)
         }
 
     def metric_value(self, metrics: dict[str, float]) -> float:
@@ -597,15 +725,18 @@ class GeneratorInteractionTrainer:
         ) as f:
             json.dump(
                 {
+                    "objective": self.args.objective,
                     "communication_type": self.args.communication_type,
                     "communication_attention_heads": self.args.communication_attention_heads,
                     "communication_topk": self.args.communication_topk,
                     "communication_every": self.args.communication_every,
                     "num_return_sequences": self.args.num_return_sequences,
                     "latent_length": self.args.latent_length,
+                    "max_new_tokens": self.args.max_new_tokens,
                     "sampling_by": self.args.sampling_by,
                     "dropout_p": self.args.dropout_p,
                     "noise_std": self.args.noise_std,
+                    "reward_baseline": self.args.reward_baseline,
                 },
                 f,
                 indent=2,
@@ -643,19 +774,12 @@ class GeneratorInteractionTrainer:
             disable=not self.accelerator.is_main_process,
             desc=self.args.run_name,
         )
-        running_loss = 0.0
-        running_score_loss = 0.0
-        running_diversity_loss = 0.0
-        running_anchor_loss = 0.0
+        running_metrics = {name: 0.0 for name in self.metric_names}
 
         for _ in range(self.num_train_epochs):
             self.generator.eval()
             for batch in self.train_dataloader:
-                batch_inputs = {
-                    k: v.to(self.accelerator.device)
-                    for k, v in batch.items()
-                    if k in {"input_ids", "attention_mask"}
-                }
+                batch_inputs = self.prepare_batch_inputs(batch)
                 with self.accelerator.accumulate(self.communication_module):
                     metrics = self.backward_batch_objective(batch_inputs)
                     if self.accelerator.sync_gradients:
@@ -669,10 +793,8 @@ class GeneratorInteractionTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
 
-                running_loss += metrics["loss"].float().item()
-                running_score_loss += metrics["score_loss"].float().item()
-                running_diversity_loss += metrics["diversity_loss"].float().item()
-                running_anchor_loss += metrics["anchor_loss"].float().item()
+                for name in self.metric_names:
+                    running_metrics[name] += metrics[name].float().item()
 
                 if not self.accelerator.sync_gradients:
                     continue
@@ -682,18 +804,12 @@ class GeneratorInteractionTrainer:
                 if self.accelerator.is_main_process and self.global_step % self.args.logging_steps == 0:
                     denom = float(self.args.logging_steps)
                     train_metrics = {
-                        "train_loss": running_loss / denom,
-                        "train_score_loss": running_score_loss / denom,
-                        "train_diversity_loss": running_diversity_loss / denom,
-                        "train_anchor_loss": running_anchor_loss / denom,
-                        "lr": self.lr_scheduler.get_last_lr()[0],
+                        f"train_{name}": running_metrics[name] / denom for name in self.metric_names
                     }
+                    train_metrics["lr"] = self.lr_scheduler.get_last_lr()[0]
                     print(json.dumps({"step": self.global_step} | train_metrics))
                     self.log_wandb(train_metrics, step=self.global_step)
-                    running_loss = 0.0
-                    running_score_loss = 0.0
-                    running_diversity_loss = 0.0
-                    running_anchor_loss = 0.0
+                    running_metrics = {name: 0.0 for name in self.metric_names}
 
                 should_eval = (
                     self.eval_dataloader is not None
