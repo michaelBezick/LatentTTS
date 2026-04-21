@@ -25,9 +25,9 @@ from src.utils import InferenceCollator, add_noise, disable_dropout, enable_drop
 
 
 @dataclass
-class GeneratorCommunicationConfig:
-    run_name: str = field(default="coconut-generator-communication")
-    output_dir: str = field(default="outputs/coconut-generator-communication")
+class GeneratorInteractionConfig:
+    run_name: str = field(default="coconut-generator-interaction")
+    output_dir: str = field(default="outputs/coconut-generator-interaction")
     model_id: str = field(default="checkpoints/coconut")
     prm_id: str = field(default="checkpoints/latentRM")
     train_data_path: str = field(default="data/gsm_train.json")
@@ -58,7 +58,7 @@ class GeneratorCommunicationConfig:
     eval_frequency: int = field(default=1)
     eval_on_start: bool = field(default=True)
     use_wandb: bool = field(default=False)
-    wandb_project: str = field(default="latenttts-generator-communication")
+    wandb_project: str = field(default="latenttts-generator-interaction")
     wandb_entity: str = field(default="")
     metric_for_best_model: Literal["eval_loss", "eval_max_path_score"] = field(
         default="eval_max_path_score"
@@ -81,8 +81,8 @@ class LatentRolloutOutput:
     post_communication_latent_thoughts: torch.FloatTensor
 
 
-def parse_args(*args, **kwargs) -> GeneratorCommunicationConfig:
-    parser = HfArgumentParser(GeneratorCommunicationConfig)
+def parse_args(*args, **kwargs) -> GeneratorInteractionConfig:
+    parser = HfArgumentParser(GeneratorInteractionConfig)
     if len(args) == 1:
         if len(kwargs) > 0:
             raise ValueError(f"Invalid arguments: {args} and {kwargs}")
@@ -214,8 +214,8 @@ def rollout_latent_paths(
     )
 
 
-class GeneratorCommunicationTrainer:
-    def __init__(self, args: GeneratorCommunicationConfig):
+class GeneratorInteractionTrainer:
+    def __init__(self, args: GeneratorInteractionConfig):
         self.args = args
         self.accelerator = Accelerator(
             mixed_precision=("no" if args.model_dtype == "fp32" else args.model_dtype),
@@ -257,7 +257,7 @@ class GeneratorCommunicationTrainer:
             )
             if not restored:
                 raise ValueError(
-                    f"Could not restore generator communication module from {args.init_communication_from}"
+                    f"Could not restore generator interaction module from {args.init_communication_from}"
                 )
 
         for param in self.generator.parameters():
@@ -320,7 +320,7 @@ class GeneratorCommunicationTrainer:
             param for param in self.communication_module.parameters() if param.requires_grad
         ]
         if len(trainable_params) == 0:
-            raise ValueError("No trainable generator communication parameters found")
+            raise ValueError("No trainable generator interaction parameters found")
         self.optimizer = AdamW(
             trainable_params,
             lr=args.learning_rate,
@@ -389,7 +389,7 @@ class GeneratorCommunicationTrainer:
                     import wandb
                 except ImportError as exc:
                     raise ImportError(
-                        "W&B logging requested for generator communication training, but wandb is not installed."
+                        "W&B logging requested for generator interaction training, but wandb is not installed."
                     ) from exc
                 wandb_init_kwargs = {
                     "project": args.wandb_project,
@@ -713,7 +713,7 @@ class GeneratorCommunicationTrainer:
 
 def main(*args, **kwargs):
     trainer_args = parse_args(*args, **kwargs)
-    trainer = GeneratorCommunicationTrainer(trainer_args)
+    trainer = GeneratorInteractionTrainer(trainer_args)
     trainer.train()
 
 

@@ -14,7 +14,7 @@ from accelerate import Accelerator
 from fire import Fire
 
 from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
-from .paths import MODELS
+from .model_registry import MODELS
 from .utils import pass_at_k_mean, InferenceCollator
 
 

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${REPO_ROOT}/logs/slurm"
 
-TRAIN_CONFIG="${1:-${TRAIN_CONFIG:-training_args/train_coconut_generator_attention.yaml}}"
+TRAIN_CONFIG="${1:-${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_attention.yaml}}"
 
 ACCOUNT="${ACCOUNT:-}"
 PARTITION="${PARTITION:-}"
@@ -28,7 +28,7 @@ export MIXED_PRECISION
 mkdir -p "${LOG_DIR}"
 
 sbatch_args=(
-    "--job-name=latenttts-gen-comm-train"
+    "--job-name=latenttts-gen-interaction-train"
     "--nodes=1" "--ntasks=1"
     "--chdir=${REPO_ROOT}"
     "--cpus-per-task=${CPUS_PER_TASK}"
@@ -47,5 +47,5 @@ else
     sbatch_args+=("--gres=gpu:${NUM_GPUS}")
 fi
 
-echo "Submitting generator communication training job: ${TRAIN_CONFIG}"
-sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/run_train_generator_comm.sbatch"
+echo "Submitting generator interaction training job: ${TRAIN_CONFIG}"
+sbatch "${sbatch_args[@]}" "${SCRIPT_DIR}/run_train_generator_interaction.sbatch"

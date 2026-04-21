@@ -14,7 +14,7 @@ from fire import Fire
 
 from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
 from .models.perturbation import find_and_replace_target_modules, MCLinear
-from .paths import MODELS
+from .model_registry import MODELS
 from .utils import pass_at_k_mean, InferenceCollator
 
 

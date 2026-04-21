@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --output=logs/slurm/%x-%j.out
 
-REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_train_generator_comm.sh}"
-TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_generator_attention.yaml}"
+REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_train_generator_interaction.sh}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_attention.yaml}"
 NUM_GPUS="${NUM_GPUS:-4}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
@@ -11,7 +11,7 @@ WANDB_DIR="${WANDB_DIR:-${REPO_ROOT}/wandb-offline}"
 WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-${WANDB_DIR}/cache}"
 WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-${WANDB_DIR}/config}"
 WANDB_DATA_DIR="${WANDB_DATA_DIR:-${WANDB_DIR}/data}"
-WANDB_PROJECT="${WANDB_PROJECT:-latenttts-generator-communication}"
+WANDB_PROJECT="${WANDB_PROJECT:-latenttts-generator-interaction}"
 
 mkdir -p "${REPO_ROOT}/logs/slurm"
 mkdir -p "${WANDB_DIR}" "${WANDB_CACHE_DIR}" "${WANDB_CONFIG_DIR}" "${WANDB_DATA_DIR}"
@@ -42,11 +42,11 @@ export WANDB_PROJECT
 
 printf 'Offline W&B runs can be synced later with: wandb sync %s/wandb/offline-run-*\n' "${WANDB_DIR}"
 
-printf 'Running: accelerate launch -m src.train_generator_comm %s\n' "${TRAIN_CONFIG}"
+printf 'Running: accelerate launch -m src.train_generator_interaction %s\n' "${TRAIN_CONFIG}"
 srun accelerate launch \
     --num_processes "${NUM_GPUS}" \
     --num_machines 1 \
     --main_process_port "${MAIN_PROCESS_PORT}" \
     --mixed_precision "${MIXED_PRECISION}" \
-    -m src.train_generator_comm \
+    -m src.train_generator_interaction \
     "${TRAIN_CONFIG}"

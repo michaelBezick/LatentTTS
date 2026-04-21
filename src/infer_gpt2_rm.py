@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from fire import Fire
 
 from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
-from .paths import MODELS
+from .model_registry import MODELS
 from .models.gpt2 import COCONUTGPT2ForTokenClassification
 from .models.llama import COCONUTLlamaForTokenClassification
 from .models.communication import (
@@ -185,7 +185,7 @@ def main(
 ):
     if prm_mode == "beam_search" and generator_communication_type != "none":
         raise ValueError(
-            "Generator-side communication is only supported for sampled best_of_n inference. "
+            "Generator-side interaction is only supported for sampled best_of_n inference. "
             "The beam_search path is not overridden in this repo."
         )
     new_line_after_input = generator_type == "coconut"
@@ -268,7 +268,7 @@ def main(
             )
             if not restored:
                 raise ValueError(
-                    f"Could not restore generator communication module from {generator_communication_checkpoint}"
+                    f"Could not restore generator interaction module from {generator_communication_checkpoint}"
                 )
         model.communication_module = model.communication_module.to(
             device=model.device, dtype=model.dtype

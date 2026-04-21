@@ -88,7 +88,7 @@ import datasets
 import wandb
 
 from .models.perturbation import find_and_replace_target_modules, MCLinear
-from .paths import MODELS
+from .model_registry import MODELS
 from .utils import set_seed
 from .generation_mixin import (
     LatentGenerationMixin,

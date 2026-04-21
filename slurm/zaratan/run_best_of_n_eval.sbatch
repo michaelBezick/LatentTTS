@@ -6,7 +6,7 @@ GENERATOR_TYPE="${GENERATOR_TYPE:-coconut}"
 PRM_ID="${PRM_ID:-checkpoints/latentRM}"
 DATA_PATH="${DATA_PATH:-data/gsm_valid.json}"
 NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-64}"
-COMMUNICATION_TYPE="${COMMUNICATION_TYPE:-attention}"
+INTERACTION_TYPE="${INTERACTION_TYPE:-attention}"
 MODEL_DTYPE="${MODEL_DTYPE:-bf16}"
 
 mkdir -p "${REPO_ROOT}/logs/slurm"
@@ -35,4 +35,4 @@ srun python -m src.infer_gpt2_rm \
     --prm_id="${PRM_ID}" \
     --data_path="${DATA_PATH}" \
     --num_return_sequences="${NUM_RETURN_SEQUENCES}" \
-    --communication_type="${COMMUNICATION_TYPE}"
+    --communication_type="${INTERACTION_TYPE}"

@@ -1,3 +1,5 @@
+"""Model registry for local checkpoint-backed latent reasoning models."""
+
 import re
 
 from .models.coconut import COCONUTGPT2
