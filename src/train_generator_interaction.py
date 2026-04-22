@@ -95,7 +95,9 @@ def gaussian_latent_log_probs(
         raise ValueError(f"noise_std must be positive for verifiable RL, but got {std}")
     normalized = (samples.detach().float() - means.float()) / std
     log_normalizer = math.log(std) + 0.5 * math.log(2.0 * math.pi)
-    return (-0.5 * normalized.pow(2) - log_normalizer).mean(dim=(-1, -2))
+    # REINFORCE should use the log-probability of the full latent trajectory, not
+    # an average per latent dimension, otherwise the policy gradient is diluted.
+    return (-0.5 * normalized.pow(2) - log_normalizer).sum(dim=(-1, -2))
 
 
 def parse_args(*args, **kwargs) -> GeneratorInteractionConfig:
