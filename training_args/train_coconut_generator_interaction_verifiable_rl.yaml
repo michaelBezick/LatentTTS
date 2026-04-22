@@ -47,3 +47,5 @@ normalize_advantages: true
 use_prm_advantages: true
 diversity_penalty_weight: 1.0
 anchor_weight: 0.05
+use_dense_credit: true
+traj_credit_weight: 1.0

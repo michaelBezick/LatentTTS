@@ -20,6 +20,7 @@ from src.model_registry import MODELS
 from src.models.coconut import COCONUTGPT2
 from src.models.gpt2 import COCONUTGPT2ForTokenClassification
 from src.models.communication import (
+    CrossPathAttentionCommunication,
     build_communication_module,
     restore_communication_module_from_checkpoint,
 )
@@ -75,6 +76,8 @@ class GeneratorInteractionConfig:
     freeze_prm: bool = field(default=False)
     diversity_penalty_weight: float = field(default=0.1)
     anchor_weight: float = field(default=0.5)
+    use_dense_credit: bool = field(default=False)
+    traj_credit_weight: float = field(default=1.0)
     dataloader_num_workers: int = field(default=0)
     sort_by_len: bool = field(default=True)
     max_train_samples: int | None = field(default=None)
@@ -88,6 +91,7 @@ class LatentRolloutOutput:
     latent_thoughts: torch.FloatTensor
     pre_communication_latent_thoughts: torch.FloatTensor
     post_communication_latent_thoughts: torch.FloatTensor
+    attention_weights: torch.FloatTensor | None = None  # [B, L_comm, N, N]
 
 
 def gaussian_latent_log_probs(
@@ -107,6 +111,19 @@ def gaussian_latent_log_probs(
     # trust region to max_grad_norm + anchor/KL, which is what actually
     # controls drift.
     return (-0.5 * normalized.pow(2) - log_normalizer).mean(dim=(-1, -2))
+
+
+def gaussian_latent_log_probs_per_step(
+    samples: torch.Tensor,
+    means: torch.Tensor,
+    std: float,
+) -> torch.Tensor:
+    """Returns [B*N, L] — log-prob averaged over hidden dim only, one value per latent step."""
+    if std <= 0:
+        raise ValueError(f"noise_std must be positive for verifiable RL, but got {std}")
+    normalized = (samples.detach().float() - means.float()) / std
+    log_normalizer = math.log(std) + 0.5 * math.log(2.0 * math.pi)
+    return (-0.5 * normalized.pow(2) - log_normalizer).mean(dim=-1)  # [B*N, L]
 
 
 def parse_args(*args, **kwargs) -> GeneratorInteractionConfig:
@@ -175,6 +192,7 @@ def rollout_latent_paths(
     sampling_by: Literal["dropout", "noise"],
     noise_std: float,
     communication_every: int,
+    collect_attention_weights: bool = False,
 ) -> LatentRolloutOutput:
     base_batch_size = input_ids.shape[0]
     total_batch_size = base_batch_size * num_return_sequences
@@ -188,6 +206,7 @@ def rollout_latent_paths(
     latent_steps = []
     pre_communication_steps = []
     post_communication_steps = []
+    attention_weight_steps = []
     dropout_sampling = sampling_by == "dropout"
     if dropout_sampling:
         enable_dropout(model)
@@ -204,11 +223,19 @@ def rollout_latent_paths(
 
             if latent_step % max(1, communication_every) == 0:
                 grouped_latent = next_latent.view(base_batch_size, num_return_sequences, -1)
-                next_latent = communication_module(
+                result = communication_module(
                     grouped_latent,
                     alive_mask=alive_mask,
                     step_idx=latent_step,
-                ).view(total_batch_size, -1)
+                    return_weights=collect_attention_weights,
+                )
+                if collect_attention_weights:
+                    comm_out, attn_w = result
+                    if attn_w is not None:
+                        attention_weight_steps.append(attn_w.detach())
+                else:
+                    comm_out = result
+                next_latent = comm_out.view(total_batch_size, -1)
             post_communication_steps.append(next_latent)
 
             if sampling_by == "noise":
@@ -233,12 +260,14 @@ def rollout_latent_paths(
         if dropout_sampling:
             disable_dropout(model)
 
+    attn_stack = torch.stack(attention_weight_steps, dim=1) if attention_weight_steps else None
     return LatentRolloutOutput(
         input_ids=input_ids,
         attention_mask=attention_mask,
         latent_thoughts=torch.stack(latent_steps, dim=1),
         pre_communication_latent_thoughts=torch.stack(pre_communication_steps, dim=1),
         post_communication_latent_thoughts=torch.stack(post_communication_steps, dim=1),
+        attention_weights=attn_stack,
     )
 
 
@@ -680,6 +709,46 @@ class GeneratorInteractionTrainer:
         else:
             self.wandb_run.log(metrics, step=step)
 
+    def compute_2d_credit_weights(
+        self,
+        rollout: LatentRolloutOutput,
+        advantages: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute time and trajectory credit weights for dense credit assignment.
+
+        Returns:
+            w_time: [B, L] normalized over latent steps (sums to 1), based on attention sharpness.
+            w_traj: [B, N] normalized so mean=1 over trajectories, based on cross-path credit.
+        Both tensors are detached.
+        """
+        B, N = advantages.shape
+        L = rollout.latent_thoughts.shape[1]
+        attn = rollout.attention_weights   # [B, L_comm, N, N] or None
+        comm_every = max(1, self.args.communication_every)
+        device = advantages.device
+
+        if attn is not None:
+            eps = 1e-8
+            H = -(attn * (attn + eps).log()).sum(dim=-1)          # [B, L_comm, N]
+            max_H = math.log(max(N, 2))
+            sharpness = (1.0 - H / max_H).mean(dim=-1)            # [B, L_comm]
+            sharpness_expanded = sharpness.repeat_interleave(comm_every, dim=1)[:, :L]  # [B, L]
+            w_time = torch.softmax(sharpness_expanded, dim=-1)     # [B, L]
+        else:
+            w_time = torch.full((B, L), 1.0 / L, device=device)
+
+        if attn is not None and self.args.traj_credit_weight > 0:
+            pos_adv = advantages.clamp(min=0)                      # [B, N]
+            mean_attn = attn.mean(dim=1)                           # [B, N, N] (query, key)
+            # how much did positive-advantage trajectories attend TO each trajectory?
+            w_raw = torch.einsum("bn,bnk->bk", pos_adv, mean_attn)  # [B, N]
+            w_traj = 1.0 + self.args.traj_credit_weight * w_raw    # [B, N], baseline=1
+            w_traj = w_traj / w_traj.mean(dim=1, keepdim=True)     # normalize: mean=1
+        else:
+            w_traj = torch.ones(B, N, device=device)
+
+        return w_time.detach(), w_traj.detach()
+
     def compute_batch_objective(self, batch: dict[str, torch.Tensor]):
         rollout = rollout_latent_paths(
             model=self.generator,
@@ -692,6 +761,7 @@ class GeneratorInteractionTrainer:
             sampling_by=self.args.sampling_by,
             noise_std=self.args.noise_std,
             communication_every=self.args.communication_every,
+            collect_attention_weights=self.args.use_dense_credit,
         )
         if self.args.objective == "prm":
             prm_outputs = self.prm(
@@ -724,12 +794,24 @@ class GeneratorInteractionTrainer:
                 pg_advantages = self.compute_reward_advantages(selector_scores).detach()
             else:
                 pg_advantages = self.compute_reward_advantages(rewards).detach()
-            log_probs = gaussian_latent_log_probs(
-                samples=rollout.latent_thoughts,
-                means=rollout.post_communication_latent_thoughts,
-                std=self.args.noise_std,
-            ).view(-1, self.args.num_return_sequences)
-            policy_loss = -(pg_advantages * log_probs).mean()
+            if self.args.use_dense_credit:
+                base_batch_size = batch["input_ids"].shape[0]
+                per_step_lp = gaussian_latent_log_probs_per_step(
+                    samples=rollout.latent_thoughts,
+                    means=rollout.post_communication_latent_thoughts,
+                    std=self.args.noise_std,
+                ).view(base_batch_size, self.args.num_return_sequences, -1)  # [B, N, L]
+                w_time, w_traj = self.compute_2d_credit_weights(rollout, pg_advantages)
+                credit = w_time.unsqueeze(1) * w_traj.unsqueeze(2)  # [B, N, L]
+                weighted_lp = (credit * per_step_lp).sum(dim=-1)    # [B, N]
+                policy_loss = -(pg_advantages * weighted_lp).mean()
+            else:
+                log_probs = gaussian_latent_log_probs(
+                    samples=rollout.latent_thoughts,
+                    means=rollout.post_communication_latent_thoughts,
+                    std=self.args.noise_std,
+                ).view(-1, self.args.num_return_sequences)
+                policy_loss = -(pg_advantages * log_probs).mean()
             selector_probs = torch.softmax(selector_scores / self.args.score_temperature, dim=1)
             selector_loss = -((selector_probs * rewards).sum(dim=1)).mean()
             objective_loss = policy_loss + selector_loss

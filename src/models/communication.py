@@ -56,22 +56,27 @@ def restore_communication_module_from_checkpoint(
     return True
 
 class BaseCommunication(nn.Module):
-    def forward(self, x, alive_mask=None, step_idx=None):
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
         # x: [B, N, D]
         raise NotImplementedError
 
 class IdentityCommunication(BaseCommunication):
-    def forward(self, x, alive_mask=None, step_idx=None):
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
+        if return_weights:
+            return x, None
         return x
 
 class MeanBroadcastCommunication(BaseCommunication):
-    def forward(self, x, alive_mask=None, step_idx=None):
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
         if alive_mask is None:
             pooled = x.mean(dim=1, keepdim=True)
         else:
             w = alive_mask.float().unsqueeze(-1)
             pooled = (x * w).sum(dim=1, keepdim=True) / w.sum(dim=1, keepdim=True).clamp_min(1.0)
-        return x + pooled
+        out = x + pooled
+        if return_weights:
+            return out, None
+        return out
 
 class CrossPathAttentionCommunication(BaseCommunication):
     """Cross-path attention communication module.
@@ -117,12 +122,21 @@ class CrossPathAttentionCommunication(BaseCommunication):
         self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.ln = nn.LayerNorm(d_model)
 
-    def forward(self, x, alive_mask=None, step_idx=None):
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
         # Mask finished paths from the KEY dimension so live paths ignore them.
         # No attn_mask is used — attention is fully bidirectional (non-causal).
+        # need_weights=True disables flash attention but is only used during training.
         key_padding_mask = None if alive_mask is None else ~alive_mask
-        y, _ = self.attn(x, x, x, key_padding_mask=key_padding_mask, need_weights=False)
-        return self.ln(x + y)
+        y, attn_weights = self.attn(
+            x, x, x,
+            key_padding_mask=key_padding_mask,
+            need_weights=return_weights,
+            average_attn_weights=True,  # average over heads → [B, N, N]
+        )
+        out = self.ln(x + y)
+        if return_weights:
+            return out, attn_weights  # attn_weights: [B, N, N]
+        return out
 
 class TopKRouterCommunication(BaseCommunication):
     def __init__(self, d_model, topk=2):
@@ -132,7 +146,7 @@ class TopKRouterCommunication(BaseCommunication):
         self.topk = topk
         self.ln = nn.LayerNorm(d_model)
 
-    def forward(self, x, alive_mask=None, step_idx=None):
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
         # x: [B, N, D]
         routed = self.router(x)
         scores = self.score(x).squeeze(-1)  # [B, N]
@@ -145,7 +159,10 @@ class TopKRouterCommunication(BaseCommunication):
             top_idx.unsqueeze(-1).expand(-1, -1, routed.size(-1))
         )
         summary = gathered.mean(dim=1, keepdim=True)
-        return self.ln(x + summary)
+        out = self.ln(x + summary)
+        if return_weights:
+            return out, None
+        return out
 
 
 def build_communication_module(
