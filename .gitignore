@@ -214,3 +214,6 @@ AGENTS.md
 logs/
 .codex
 outputs/
+wandb/
+wandb-offline/
+sync_wandb.sh
