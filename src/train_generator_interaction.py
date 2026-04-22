@@ -63,14 +63,16 @@ class GeneratorInteractionConfig:
     logging_steps: int = field(default=10)
     eval_frequency: int = field(default=1)
     eval_on_start: bool = field(default=True)
+    eval_only: bool = field(default=False)
     use_wandb: bool = field(default=False)
     wandb_project: str = field(default="latenttts-generator-interaction")
     wandb_entity: str = field(default="")
     metric_for_best_model: str = field(default="eval_max_path_score")
     score_temperature: float = field(default=0.25)
     reward_baseline: Literal["leave_one_out", "group_mean"] = field(default="leave_one_out")
+    normalize_advantages: bool = field(default=True)
     diversity_penalty_weight: float = field(default=0.1)
-    anchor_weight: float = field(default=0.01)
+    anchor_weight: float = field(default=0.5)
     dataloader_num_workers: int = field(default=0)
     sort_by_len: bool = field(default=True)
     max_train_samples: int | None = field(default=None)
@@ -95,9 +97,14 @@ def gaussian_latent_log_probs(
         raise ValueError(f"noise_std must be positive for verifiable RL, but got {std}")
     normalized = (samples.detach().float() - means.float()) / std
     log_normalizer = math.log(std) + 0.5 * math.log(2.0 * math.pi)
-    # REINFORCE should use the log-probability of the full latent trajectory, not
-    # an average per latent dimension, otherwise the policy gradient is diluted.
-    return (-0.5 * normalized.pow(2) - log_normalizer).sum(dim=(-1, -2))
+    # Per-dim mean, not sum. Summing over (latent_length, hidden) makes the
+    # gradient into `means` scale as (1/std^2) * sqrt(T * D) — with T=6, D=768,
+    # std=0.1, that saturates max_grad_norm and the clipped direction is
+    # dominated by whichever noise realization happened to align with its
+    # advantage. Mean keeps the per-element magnitude bounded and leaves the
+    # trust region to max_grad_norm + anchor/KL, which is what actually
+    # controls drift.
+    return (-0.5 * normalized.pow(2) - log_normalizer).mean(dim=(-1, -2))
 
 
 def parse_args(*args, **kwargs) -> GeneratorInteractionConfig:
@@ -547,9 +554,16 @@ class GeneratorInteractionTrainer:
 
     def compute_reward_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         if self.args.reward_baseline == "group_mean":
-            return rewards - rewards.mean(dim=1, keepdim=True)
-        baselines = (rewards.sum(dim=1, keepdim=True) - rewards) / (self.args.num_return_sequences - 1)
-        return rewards - baselines
+            advantages = rewards - rewards.mean(dim=1, keepdim=True)
+        else:
+            baselines = (rewards.sum(dim=1, keepdim=True) - rewards) / (self.args.num_return_sequences - 1)
+            advantages = rewards - baselines
+        if self.args.normalize_advantages:
+            # Divide by per-group std so binary-reward groups don't dominate
+            # mixed-reward ones. Clamp guards groups where all paths got the
+            # same reward (std=0 → advantage is already zero).
+            advantages = advantages / advantages.std(dim=1, keepdim=True, unbiased=False).clamp_min(1e-6)
+        return advantages
 
     def compute_selector_scores(
         self,
@@ -841,13 +855,18 @@ class GeneratorInteractionTrainer:
                     self.wandb_run.summary[key] = value
 
     def train(self):
-        if self.eval_dataloader is not None and self.args.eval_on_start:
+        if self.eval_dataloader is not None and (self.args.eval_on_start or self.args.eval_only):
             eval_metrics = self.evaluate()
             if self.accelerator.is_main_process:
                 print(json.dumps(eval_metrics, indent=2))
             self.log_wandb(eval_metrics, step=self.global_step)
             self.maybe_save_best(eval_metrics)
             self.accelerator.wait_for_everyone()
+
+        if self.args.eval_only:
+            if self.accelerator.is_main_process and self.wandb_run is not None:
+                self.wandb_run.finish()
+            return
 
         eval_interval = max(1, self.num_update_steps_per_epoch // max(1, self.args.eval_frequency))
         progress_bar = tqdm(

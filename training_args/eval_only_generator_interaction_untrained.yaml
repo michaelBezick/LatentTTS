@@ -1,5 +1,5 @@
-run_name: "coconut-generator-interaction-verifiable-rl"
-output_dir: "outputs/coconut-generator-interaction-verifiable-rl"
+run_name: "coconut-generator-interaction-eval-only-untrained"
+output_dir: "outputs/coconut-generator-interaction-eval-only-untrained"
 
 model_id: "checkpoints/coconut"
 prm_id: "checkpoints/latentRM"
@@ -22,27 +22,29 @@ communication_every: 2
 sampling_by: "noise"
 noise_std: 0.1
 
-per_device_train_batch_size: 8
-per_device_eval_batch_size: 8
-per_device_forward_batch_size: 2
-gradient_accumulation_steps: 4
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+per_device_forward_batch_size: 1
+gradient_accumulation_steps: 1
 
 learning_rate: 1.0e-4
 weight_decay: 0.0
 warmup_ratio: 0.05
 lr_scheduler_type: "cosine"
 num_train_epochs: 1
-max_train_steps: 1000
+max_train_steps: 1
 max_grad_norm: 1.0
 
 logging_steps: 10
-eval_frequency: 4
+eval_frequency: 1
 eval_on_start: true
-use_wandb: true
-wandb_project: "latenttts-generator-interaction"
+eval_only: true
+use_wandb: false
 metric_for_best_model: "eval_selected_accuracy"
 
 reward_baseline: "leave_one_out"
 normalize_advantages: true
 diversity_penalty_weight: 0.2
 anchor_weight: 0.5
+
+max_eval_samples: 128
