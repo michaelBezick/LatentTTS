@@ -71,6 +71,8 @@ class GeneratorInteractionConfig:
     score_temperature: float = field(default=0.25)
     reward_baseline: Literal["leave_one_out", "group_mean"] = field(default="leave_one_out")
     normalize_advantages: bool = field(default=True)
+    use_prm_advantages: bool = field(default=False)
+    freeze_prm: bool = field(default=False)
     diversity_penalty_weight: float = field(default=0.1)
     anchor_weight: float = field(default=0.5)
     dataloader_num_workers: int = field(default=0)
@@ -266,6 +268,7 @@ class GeneratorInteractionTrainer:
                 raise ValueError("verifiable_rl requires sampling_by='noise' so latent log-probs are defined")
             if args.num_return_sequences <= 1:
                 raise ValueError("verifiable_rl requires num_return_sequences > 1")
+        self.train_prm = args.objective == "verifiable_rl" and not args.freeze_prm
 
         self.generator = COCONUTGPT2.from_pretrained(
             args.model_id,
@@ -311,8 +314,8 @@ class GeneratorInteractionTrainer:
         )
         self.prm.config.use_cache = False
         for param in self.prm.parameters():
-            param.requires_grad = args.objective == "verifiable_rl"
-        if args.objective == "verifiable_rl":
+            param.requires_grad = self.train_prm
+        if self.train_prm:
             self.prm.train()
         else:
             self.prm.eval()
@@ -363,7 +366,7 @@ class GeneratorInteractionTrainer:
         trainable_params = [
             param for param in self.communication_module.parameters() if param.requires_grad
         ]
-        if args.objective == "verifiable_rl":
+        if self.train_prm:
             trainable_params.extend(param for param in self.prm.parameters() if param.requires_grad)
         if len(trainable_params) == 0:
             raise ValueError("No trainable generator interaction parameters found")
@@ -713,13 +716,20 @@ class GeneratorInteractionTrainer:
                 rollout,
                 selector_scores=selector_scores,
             )
-            advantages = self.compute_reward_advantages(rewards).detach()
+            # PRM scores provide a continuous, per-sample signal correlated with
+            # correctness. Binary rewards have near-zero covariance with the Gaussian
+            # noise realizations, so the REINFORCE gradient is effectively dead.
+            # PRM scores vary continuously within a group and give a real ranking.
+            if self.args.use_prm_advantages:
+                pg_advantages = self.compute_reward_advantages(selector_scores).detach()
+            else:
+                pg_advantages = self.compute_reward_advantages(rewards).detach()
             log_probs = gaussian_latent_log_probs(
                 samples=rollout.latent_thoughts,
                 means=rollout.post_communication_latent_thoughts,
                 std=self.args.noise_std,
             ).view(-1, self.args.num_return_sequences)
-            policy_loss = -(advantages * log_probs).mean()
+            policy_loss = -(pg_advantages * log_probs).mean()
             selector_probs = torch.softmax(selector_scores / self.args.score_temperature, dim=1)
             selector_loss = -((selector_probs * rewards).sum(dim=1)).mean()
             objective_loss = policy_loss + selector_loss
@@ -805,7 +815,7 @@ class GeneratorInteractionTrainer:
             ).state_dict().items()
         }
         save_file(state_dict, os.path.join(checkpoint_dir, "model.safetensors"))
-        if self.args.objective == "verifiable_rl":
+        if self.train_prm:
             prm_checkpoint_dir = os.path.join(checkpoint_dir, "prm")
             os.makedirs(prm_checkpoint_dir, exist_ok=True)
             self.accelerator.unwrap_model(self.prm).save_pretrained(
@@ -831,7 +841,8 @@ class GeneratorInteractionTrainer:
                     "dropout_p": self.args.dropout_p,
                     "noise_std": self.args.noise_std,
                     "reward_baseline": self.args.reward_baseline,
-                    "selector_checkpoint": "prm" if self.args.objective == "verifiable_rl" else None,
+                    "freeze_prm": self.args.freeze_prm,
+                    "selector_checkpoint": "prm" if self.train_prm else None,
                 },
                 f,
                 indent=2,
@@ -880,11 +891,13 @@ class GeneratorInteractionTrainer:
 
         for _ in range(self.num_train_epochs):
             self.generator.eval()
-            if self.args.objective == "verifiable_rl":
+            if self.train_prm:
                 self.prm.train()
+            else:
+                self.prm.eval()
             for batch in self.train_dataloader:
                 batch_inputs = self.prepare_batch_inputs(batch)
-                if self.args.objective == "verifiable_rl":
+                if self.train_prm:
                     self.prm.train()
                     accumulation_context = self.accelerator.accumulate(
                         self.communication_module,
@@ -899,7 +912,7 @@ class GeneratorInteractionTrainer:
                     accumulation_count += 1
                     if self.accelerator.sync_gradients:
                         grad_params = list(self.communication_module.parameters())
-                        if self.args.objective == "verifiable_rl":
+                        if self.train_prm:
                             grad_params.extend(self.prm.parameters())
                         self.accelerator.clip_grad_norm_(grad_params, self.args.max_grad_norm)
                         self.optimizer.step()
