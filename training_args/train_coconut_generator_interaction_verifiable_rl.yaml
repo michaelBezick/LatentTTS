@@ -1,5 +1,5 @@
-run_name: "coconut-generator-interaction-verifiable-rl"
-output_dir: "outputs/coconut-generator-interaction-verifiable-rl"
+run_name: "coconut-generator-interaction-verifiable-rl-dense-credit"
+output_dir: "outputs/coconut-generator-interaction-verifiable-rl-dense-credit"
 
 model_id: "checkpoints/coconut"
 prm_id: "checkpoints/latentRM"
@@ -44,8 +44,8 @@ metric_for_best_model: "eval_selected_accuracy"
 
 reward_baseline: "leave_one_out"
 normalize_advantages: true
-use_prm_advantages: true
-diversity_penalty_weight: 1.0
-anchor_weight: 0.05
+use_prm_advantages: false
+diversity_penalty_weight: 0.2
+anchor_weight: 0.5
 use_dense_credit: true
 traj_credit_weight: 1.0
