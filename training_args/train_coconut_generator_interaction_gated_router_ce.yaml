@@ -1,0 +1,64 @@
+run_name: "coconut-generator-interaction-gated-router-ce"
+output_dir: "outputs/coconut-generator-interaction-gated-router-ce"
+
+model_id: "checkpoints/coconut"
+prm_id: "checkpoints/latentRM"
+objective: "ce"
+
+train_data_path: "data/gsm_train.json"
+valid_data_path: "data/gsm_valid.json"
+
+model_dtype: "bf16"
+seed: 42
+
+num_return_sequences: 8
+latent_length: 6
+max_new_tokens: 128
+
+communication_type: "gated_router"
+communication_topk: 2
+communication_gate_bias: -4.0
+communication_interaction_scale: 1.0
+communication_every: 1
+
+sampling_by: "dropout"
+dropout_p: 0.2
+
+train_generator_lora: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target_modules:
+  - "c_attn"
+  - "c_proj"
+ce_prm_weight: 0.5
+
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+per_device_forward_batch_size: 2
+gradient_accumulation_steps: 4
+
+learning_rate: 1.0e-4
+weight_decay: 0.0
+warmup_ratio: 0.05
+lr_scheduler_type: "cosine"
+num_train_epochs: 1
+max_train_steps: 10000
+max_grad_norm: 1.0
+
+logging_steps: 10
+eval_frequency: 4
+eval_on_start: true
+use_wandb: true
+wandb_project: "latenttts-generator-interaction"
+metric_for_best_model: "eval_selected_accuracy"
+
+score_temperature: 0.25
+reward_baseline: "leave_one_out"
+normalize_advantages: true
+use_prm_advantages: false
+freeze_prm: true
+diversity_penalty_weight: 0.1
+anchor_weight: 0.5
+use_dense_credit: false
+traj_credit_weight: 1.0

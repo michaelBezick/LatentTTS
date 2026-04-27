@@ -35,10 +35,12 @@ def main(
     sampling_by: Literal["dropout", "noise"] = "dropout",
     noise_std: float | None = None,
     dropout_p: float | None = None,
-    generator_communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    generator_communication_type: Literal["none", "mean", "attention", "router", "gated_router"] = "none",
     generator_communication_checkpoint: str = "",
     generator_communication_attention_heads: int = 4,
     generator_communication_topk: int = 2,
+    generator_communication_gate_bias: float = -4.0,
+    generator_communication_interaction_scale: float = 1.0,
     generator_communication_every: int = 1,
     seed: int = 200,
 ):
@@ -106,6 +108,8 @@ def main(
             d_model=model.config.hidden_size,
             n_heads=generator_communication_attention_heads,
             topk=generator_communication_topk,
+            gate_bias=generator_communication_gate_bias,
+            interaction_scale=generator_communication_interaction_scale,
         )
         if generator_communication_checkpoint:
             restored = restore_communication_module_from_checkpoint(

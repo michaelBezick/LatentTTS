@@ -15,6 +15,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer, HfArgumentParser, get_scheduler
 
+try:
+    from peft import LoraConfig, get_peft_model
+except ImportError:  # pragma: no cover - PEFT is a required repo dependency.
+    LoraConfig = None
+    get_peft_model = None
+
 from src.generation_mixin import LatentGenerationConfig
 from src.model_registry import MODELS
 from src.models.coconut import COCONUTGPT2
@@ -34,7 +40,7 @@ class GeneratorInteractionConfig:
     output_dir: str = field(default="outputs/coconut-generator-interaction")
     model_id: str = field(default="checkpoints/coconut")
     prm_id: str = field(default="checkpoints/latentRM")
-    objective: Literal["prm", "verifiable_rl"] = field(default="prm")
+    objective: Literal["prm", "verifiable_rl", "ce"] = field(default="prm")
     train_data_path: str = field(default="data/gsm_train.json")
     valid_data_path: str = field(default="data/gsm_valid.json")
     model_dtype: Literal["fp32", "fp16", "bf16"] = field(default="bf16")
@@ -42,9 +48,11 @@ class GeneratorInteractionConfig:
     num_return_sequences: int = field(default=8)
     latent_length: int = field(default=6)
     max_new_tokens: int = field(default=128)
-    communication_type: Literal["mean", "attention", "router"] = field(default="attention")
+    communication_type: Literal["mean", "attention", "router", "gated_router"] = field(default="attention")
     communication_attention_heads: int = field(default=4)
     communication_topk: int = field(default=2)
+    communication_gate_bias: float = field(default=-4.0)
+    communication_interaction_scale: float = field(default=1.0)
     communication_every: int = field(default=1)
     init_communication_from: str = field(default="")
     sampling_by: Literal["dropout", "noise"] = field(default="dropout")
@@ -74,6 +82,12 @@ class GeneratorInteractionConfig:
     normalize_advantages: bool = field(default=True)
     use_prm_advantages: bool = field(default=False)
     freeze_prm: bool = field(default=False)
+    train_generator_lora: bool = field(default=False)
+    lora_r: int = field(default=8)
+    lora_alpha: int = field(default=16)
+    lora_dropout: float = field(default=0.05)
+    lora_target_modules: list[str] = field(default_factory=lambda: ["c_attn", "c_proj"])
+    ce_prm_weight: float = field(default=0.5)
     diversity_penalty_weight: float = field(default=0.1)
     anchor_weight: float = field(default=0.5)
     use_dense_credit: bool = field(default=False)
@@ -149,6 +163,32 @@ def resolve_torch_dtype(model_dtype: str) -> torch.dtype | None:
     return None
 
 
+def get_base_generator_model(model: torch.nn.Module) -> torch.nn.Module:
+    if hasattr(model, "module"):
+        model = model.module
+    if hasattr(model, "get_base_model"):
+        return model.get_base_model()
+    return model
+
+
+def format_numeric_answer(answer) -> str:
+    value = float(answer)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.10g}"
+
+
+def unique_parameters(parameters):
+    seen = set()
+    unique = []
+    for param in parameters:
+        if id(param) in seen:
+            continue
+        seen.add(id(param))
+        unique.append(param)
+    return unique
+
+
 def safe_parse_answer(answer: str) -> float | None:
     try:
         return float(answer.replace(",", ""))
@@ -194,11 +234,12 @@ def rollout_latent_paths(
     communication_every: int,
     collect_attention_weights: bool = False,
 ) -> LatentRolloutOutput:
+    base_model = get_base_generator_model(model)
     base_batch_size = input_ids.shape[0]
     total_batch_size = base_batch_size * num_return_sequences
     input_ids = input_ids.repeat_interleave(num_return_sequences, dim=0)
     attention_mask = attention_mask.repeat_interleave(num_return_sequences, dim=0)
-    inputs_embeds = model.get_input_embeddings()(torch.where(input_ids == latent_token_id, 0, input_ids))
+    inputs_embeds = base_model.get_input_embeddings()(torch.where(input_ids == latent_token_id, 0, input_ids))
     alive_mask = torch.ones(
         base_batch_size, num_return_sequences, dtype=torch.bool, device=input_ids.device
     )
@@ -212,7 +253,7 @@ def rollout_latent_paths(
         enable_dropout(model)
     try:
         for latent_step in range(latent_length):
-            transformer_outputs = model.transformer(
+            transformer_outputs = base_model.transformer(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
                 use_cache=False,
@@ -297,7 +338,10 @@ class GeneratorInteractionTrainer:
                 raise ValueError("verifiable_rl requires sampling_by='noise' so latent log-probs are defined")
             if args.num_return_sequences <= 1:
                 raise ValueError("verifiable_rl requires num_return_sequences > 1")
+        if args.objective == "ce" and args.num_return_sequences <= 1:
+            raise ValueError("ce requires num_return_sequences > 1 so the PRM selector can rank paths")
         self.train_prm = args.objective == "verifiable_rl" and not args.freeze_prm
+        self.train_generator = args.objective == "ce" and args.train_generator_lora
 
         self.generator = COCONUTGPT2.from_pretrained(
             args.model_id,
@@ -312,6 +356,8 @@ class GeneratorInteractionTrainer:
             d_model=self.generator.config.hidden_size,
             n_heads=args.communication_attention_heads,
             topk=args.communication_topk,
+            gate_bias=args.communication_gate_bias,
+            interaction_scale=args.communication_interaction_scale,
         )
         self.generator.communication_module = self.communication_module
         if args.init_communication_from:
@@ -324,8 +370,23 @@ class GeneratorInteractionTrainer:
                     f"Could not restore generator interaction module from {args.init_communication_from}"
                 )
 
-        for param in self.generator.parameters():
-            param.requires_grad = False
+        if self.train_generator:
+            if get_peft_model is None or LoraConfig is None:
+                raise ImportError("PEFT is required for train_generator_lora=True")
+            lora_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                target_modules=args.lora_target_modules,
+                fan_in_fan_out=True,
+                bias="none",
+                task_type="CAUSAL_LM",
+            )
+            self.generator = get_peft_model(self.generator, lora_config)
+            self.generator.get_base_model().communication_module = self.communication_module
+        else:
+            for param in self.generator.parameters():
+                param.requires_grad = False
         for param in self.communication_module.parameters():
             param.requires_grad = True
         self.generator.eval()
@@ -395,8 +456,11 @@ class GeneratorInteractionTrainer:
         trainable_params = [
             param for param in self.communication_module.parameters() if param.requires_grad
         ]
+        if self.train_generator:
+            trainable_params.extend(param for param in self.generator.parameters() if param.requires_grad)
         if self.train_prm:
             trainable_params.extend(param for param in self.prm.parameters() if param.requires_grad)
+        trainable_params = unique_parameters(trainable_params)
         if len(trainable_params) == 0:
             raise ValueError("No trainable generator interaction parameters found")
         self.optimizer = AdamW(
@@ -432,64 +496,24 @@ class GeneratorInteractionTrainer:
             num_training_steps=self.max_train_steps,
         )
 
-        if self.eval_dataloader is None:
-            if args.objective == "verifiable_rl":
-                (
-                    self.communication_module,
-                    self.prm,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.lr_scheduler,
-                ) = self.accelerator.prepare(
-                    self.communication_module,
-                    self.prm,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.lr_scheduler,
-                )
-            else:
-                (
-                    self.communication_module,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.lr_scheduler,
-                ) = self.accelerator.prepare(
-                    self.communication_module,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.lr_scheduler,
-                )
-        else:
-            if args.objective == "verifiable_rl":
-                (
-                    self.communication_module,
-                    self.prm,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.eval_dataloader,
-                    self.lr_scheduler,
-                ) = self.accelerator.prepare(
-                    self.communication_module,
-                    self.prm,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.eval_dataloader,
-                    self.lr_scheduler,
-                )
-            else:
-                (
-                    self.communication_module,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.eval_dataloader,
-                    self.lr_scheduler,
-                ) = self.accelerator.prepare(
-                    self.communication_module,
-                    self.optimizer,
-                    self.train_dataloader,
-                    self.eval_dataloader,
-                    self.lr_scheduler,
-                )
+        prepare_items = [self.communication_module]
+        prepare_names = ["communication_module"]
+        if self.train_generator:
+            prepare_items.append(self.generator)
+            prepare_names.append("generator")
+        if self.train_prm:
+            prepare_items.append(self.prm)
+            prepare_names.append("prm")
+        prepare_items.extend([self.optimizer, self.train_dataloader])
+        prepare_names.extend(["optimizer", "train_dataloader"])
+        if self.eval_dataloader is not None:
+            prepare_items.append(self.eval_dataloader)
+            prepare_names.append("eval_dataloader")
+        prepare_items.append(self.lr_scheduler)
+        prepare_names.append("lr_scheduler")
+        prepared = self.accelerator.prepare(*prepare_items)
+        for name, value in zip(prepare_names, prepared):
+            setattr(self, name, value)
         self.generator = self.generator.to(self.accelerator.device)
         if self.prm is not None and args.objective != "verifiable_rl":
             self.prm = self.prm.to(self.accelerator.device)
@@ -541,6 +565,17 @@ class GeneratorInteractionTrainer:
                 "mean_reward",
                 "coverage",
                 "voting_accuracy",
+                "selected_accuracy",
+            ]
+        if self.args.objective == "ce":
+            return [
+                "loss",
+                "ce_loss",
+                "prm_weighted_ce_loss",
+                "diversity_loss",
+                "anchor_loss",
+                "mean_path_score",
+                "max_path_score",
                 "selected_accuracy",
             ]
         return [
@@ -623,7 +658,9 @@ class GeneratorInteractionTrainer:
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         input_ids = rollout.input_ids
         latent_mask = input_ids == self.latent_id
-        inputs_embeds = self.generator.get_input_embeddings()(
+        generator = self.accelerator.unwrap_model(self.generator)
+        base_model = get_base_generator_model(generator)
+        inputs_embeds = base_model.get_input_embeddings()(
             torch.where(input_ids == self.latent_id, 0, input_ids)
         )
         inputs_embeds = inputs_embeds.clone()
@@ -632,7 +669,7 @@ class GeneratorInteractionTrainer:
         ).reshape(-1, inputs_embeds.shape[-1])
 
         with torch.no_grad():
-            output = self.generator.generate(
+            output = generator.generate(
                 input_ids=input_ids,
                 attention_mask=rollout.attention_mask,
                 inputs_embeds=inputs_embeds,
@@ -675,6 +712,81 @@ class GeneratorInteractionTrainer:
             "selected_accuracy": selected_accuracy,
         }
         return rewards, reward_metrics
+
+    def build_answer_targets(self, batch: dict[str, torch.Tensor], num_paths: int) -> tuple[torch.Tensor, torch.Tensor]:
+        target_ids = []
+        for answer in batch["answer"]:
+            text = "#" + format_numeric_answer(answer)
+            ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if self.tokenizer.eos_token_id is not None:
+                ids = ids + [self.tokenizer.eos_token_id]
+            target_ids.extend([ids] * num_paths)
+
+        max_len = max(len(ids) for ids in target_ids)
+        padded = torch.full(
+            (len(target_ids), max_len),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=self.accelerator.device,
+        )
+        mask = torch.zeros_like(padded)
+        for row, ids in enumerate(target_ids):
+            values = torch.tensor(ids, dtype=torch.long, device=self.accelerator.device)
+            padded[row, : values.numel()] = values
+            mask[row, : values.numel()] = 1
+        return padded, mask
+
+    def compute_answer_ce_losses(
+        self,
+        batch: dict[str, torch.Tensor],
+        rollout: LatentRolloutOutput,
+    ) -> torch.Tensor:
+        input_ids = rollout.input_ids
+        latent_mask = input_ids == self.latent_id
+        base_model = get_base_generator_model(self.generator)
+        prefix_embeds = base_model.get_input_embeddings()(
+            torch.where(input_ids == self.latent_id, 0, input_ids)
+        )
+        prefix_embeds = prefix_embeds.clone()
+        prefix_embeds[latent_mask] = rollout.latent_thoughts.to(
+            dtype=prefix_embeds.dtype
+        ).reshape(-1, prefix_embeds.shape[-1])
+
+        target_ids, target_mask = self.build_answer_targets(
+            batch,
+            num_paths=self.args.num_return_sequences,
+        )
+        target_embeds = base_model.get_input_embeddings()(target_ids)
+        inputs_embeds = torch.cat([prefix_embeds, target_embeds], dim=1)
+        attention_mask = torch.cat([rollout.attention_mask, target_mask], dim=1)
+        labels = torch.full_like(
+            torch.cat([input_ids, target_ids], dim=1),
+            -100,
+            dtype=torch.long,
+        )
+        labels[:, input_ids.shape[1] :] = torch.where(
+            target_mask.bool(),
+            target_ids,
+            torch.full_like(target_ids, -100),
+        )
+
+        outputs = self.generator(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=None,
+            use_cache=False,
+            return_dict=True,
+        )
+        shift_logits = outputs.logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        flat_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view_as(shift_labels)
+        valid_mask = shift_labels.ne(-100)
+        return (flat_loss * valid_mask).sum(dim=-1) / valid_mask.sum(dim=-1).clamp_min(1)
 
     def evaluate_batch_objective(self, batch: dict[str, torch.Tensor]):
         batch_size = batch["input_ids"].shape[0]
@@ -779,6 +891,26 @@ class GeneratorInteractionTrainer:
                 torch.logsumexp(prm_scores / self.args.score_temperature, dim=1)
                 * self.args.score_temperature
             ).mean()
+        elif self.args.objective == "ce":
+            path_ce = self.compute_answer_ce_losses(batch, rollout)
+            path_ce = path_ce.view(-1, self.args.num_return_sequences)
+            ce_loss = path_ce.mean()
+            with torch.no_grad():
+                selector_scores = self.compute_selector_scores(rollout, detach_latents=True)
+            selector_probs = torch.softmax(selector_scores / self.args.score_temperature, dim=1)
+            prm_weighted_ce_loss = (selector_probs * path_ce).sum(dim=1).mean()
+            prm_weight = min(max(self.args.ce_prm_weight, 0.0), 1.0)
+            objective_loss = (1.0 - prm_weight) * ce_loss + prm_weight * prm_weighted_ce_loss
+            prm_scores = selector_scores
+            if torch.is_grad_enabled():
+                selected_accuracy = objective_loss.new_zeros(())
+            else:
+                _, reward_metrics = self.evaluate_verifiable_rewards(
+                    batch,
+                    rollout,
+                    selector_scores=selector_scores,
+                )
+                selected_accuracy = reward_metrics["selected_accuracy"]
         else:
             selector_scores = self.compute_selector_scores(rollout, detach_latents=True)
             rewards, reward_metrics = self.evaluate_verifiable_rewards(
@@ -840,6 +972,17 @@ class GeneratorInteractionTrainer:
                 "anchor_loss": anchor_loss.detach(),
                 "mean_path_score": prm_scores.mean().detach(),
                 "max_path_score": prm_scores.max(dim=1).values.mean().detach(),
+            }
+        elif self.args.objective == "ce":
+            metrics = {
+                "loss": total_loss.detach(),
+                "ce_loss": ce_loss.detach(),
+                "prm_weighted_ce_loss": prm_weighted_ce_loss.detach(),
+                "diversity_loss": diversity_loss.detach(),
+                "anchor_loss": anchor_loss.detach(),
+                "mean_path_score": prm_scores.mean().detach(),
+                "max_path_score": prm_scores.max(dim=1).values.mean().detach(),
+                "selected_accuracy": selected_accuracy.detach(),
             }
         else:
             metrics = {
@@ -904,6 +1047,13 @@ class GeneratorInteractionTrainer:
                 prm_checkpoint_dir,
                 safe_serialization=True,
             )
+        if self.train_generator:
+            generator_adapter_dir = os.path.join(checkpoint_dir, "generator_adapter")
+            os.makedirs(generator_adapter_dir, exist_ok=True)
+            self.accelerator.unwrap_model(self.generator).save_pretrained(
+                generator_adapter_dir,
+                safe_serialization=True,
+            )
         with open(
             os.path.join(checkpoint_dir, "communication_config.json"),
             "w",
@@ -915,6 +1065,8 @@ class GeneratorInteractionTrainer:
                     "communication_type": self.args.communication_type,
                     "communication_attention_heads": self.args.communication_attention_heads,
                     "communication_topk": self.args.communication_topk,
+                    "communication_gate_bias": self.args.communication_gate_bias,
+                    "communication_interaction_scale": self.args.communication_interaction_scale,
                     "communication_every": self.args.communication_every,
                     "num_return_sequences": self.args.num_return_sequences,
                     "latent_length": self.args.latent_length,
@@ -925,6 +1077,13 @@ class GeneratorInteractionTrainer:
                     "reward_baseline": self.args.reward_baseline,
                     "freeze_prm": self.args.freeze_prm,
                     "selector_checkpoint": "prm" if self.train_prm else None,
+                    "train_generator_lora": self.args.train_generator_lora,
+                    "generator_adapter_checkpoint": "generator_adapter" if self.train_generator else None,
+                    "lora_r": self.args.lora_r,
+                    "lora_alpha": self.args.lora_alpha,
+                    "lora_dropout": self.args.lora_dropout,
+                    "lora_target_modules": self.args.lora_target_modules,
+                    "ce_prm_weight": self.args.ce_prm_weight,
                 },
                 f,
                 indent=2,
@@ -972,21 +1131,23 @@ class GeneratorInteractionTrainer:
         accumulation_count = 0
 
         for _ in range(self.num_train_epochs):
-            self.generator.eval()
+            if self.train_generator:
+                self.generator.train()
+            else:
+                self.generator.eval()
             if self.train_prm:
                 self.prm.train()
             else:
                 self.prm.eval()
             for batch in self.train_dataloader:
                 batch_inputs = self.prepare_batch_inputs(batch)
+                accumulate_modules = [self.communication_module]
+                if self.train_generator:
+                    accumulate_modules.append(self.generator)
                 if self.train_prm:
+                    accumulate_modules.append(self.prm)
                     self.prm.train()
-                    accumulation_context = self.accelerator.accumulate(
-                        self.communication_module,
-                        self.prm,
-                    )
-                else:
-                    accumulation_context = self.accelerator.accumulate(self.communication_module)
+                accumulation_context = self.accelerator.accumulate(*accumulate_modules)
                 with accumulation_context:
                     metrics = self.backward_batch_objective(batch_inputs)
                     for name in self.metric_names:
@@ -994,8 +1155,15 @@ class GeneratorInteractionTrainer:
                     accumulation_count += 1
                     if self.accelerator.sync_gradients:
                         grad_params = list(self.communication_module.parameters())
+                        if self.train_generator:
+                            grad_params.extend(
+                                param for param in self.generator.parameters() if param.requires_grad
+                            )
                         if self.train_prm:
                             grad_params.extend(self.prm.parameters())
+                        grad_params = unique_parameters(
+                            param for param in grad_params if param.requires_grad
+                        )
                         self.accelerator.clip_grad_norm_(grad_params, self.args.max_grad_norm)
                         self.optimizer.step()
                         self.lr_scheduler.step()

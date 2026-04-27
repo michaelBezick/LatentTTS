@@ -2,7 +2,7 @@
 #SBATCH --output=logs/slurm/%x-%j.out
 
 REPO_ROOT="${REPO_ROOT:?REPO_ROOT not set — submit via submit_train_generator_interaction.sh}"
-TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_verifiable_rl.yaml}"
+TRAIN_CONFIG="${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_gated_router_ce.yaml}"
 NUM_GPUS="${NUM_GPUS:-4}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"

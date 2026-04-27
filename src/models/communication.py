@@ -165,11 +165,47 @@ class TopKRouterCommunication(BaseCommunication):
         return out
 
 
+class GatedTopKRouterCommunication(BaseCommunication):
+    def __init__(self, d_model, topk=2, gate_bias=-4.0, interaction_scale=1.0):
+        super().__init__()
+        self.router = nn.Linear(d_model, d_model)
+        self.score = nn.Linear(d_model, 1)
+        self.delta = nn.Linear(d_model, d_model)
+        self.gate = nn.Linear(d_model, 1)
+        self.topk = topk
+        self.interaction_scale = interaction_scale
+        nn.init.zeros_(self.delta.weight)
+        nn.init.zeros_(self.delta.bias)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, gate_bias)
+
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
+        # x: [B, N, D]
+        routed = self.router(x)
+        scores = self.score(x).squeeze(-1)  # [B, N]
+        if alive_mask is not None:
+            scores = scores.masked_fill(~alive_mask, float("-inf"))
+        top_idx = scores.topk(k=min(self.topk, x.size(1)), dim=1).indices
+        gathered = torch.gather(
+            routed,
+            1,
+            top_idx.unsqueeze(-1).expand(-1, -1, routed.size(-1))
+        )
+        summary = gathered.mean(dim=1, keepdim=True).expand_as(x)
+        gate = torch.sigmoid(self.gate(x))
+        out = x + self.interaction_scale * gate * self.delta(summary)
+        if return_weights:
+            return out, None
+        return out
+
+
 def build_communication_module(
     communication_type: str,
     d_model: int,
     n_heads: int = 4,
     topk: int = 2,
+    gate_bias: float = -4.0,
+    interaction_scale: float = 1.0,
 ) -> BaseCommunication:
     if communication_type == "none":
         return IdentityCommunication()
@@ -179,6 +215,13 @@ def build_communication_module(
         return CrossPathAttentionCommunication(d_model=d_model, n_heads=n_heads)
     if communication_type == "router":
         return TopKRouterCommunication(d_model=d_model, topk=topk)
+    if communication_type == "gated_router":
+        return GatedTopKRouterCommunication(
+            d_model=d_model,
+            topk=topk,
+            gate_bias=gate_bias,
+            interaction_scale=interaction_scale,
+        )
     raise ValueError(f"Unsupported communication type: {communication_type}")
 
 

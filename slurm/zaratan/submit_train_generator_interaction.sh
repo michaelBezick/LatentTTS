@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 LOG_DIR="${REPO_ROOT}/logs/slurm"
 
-TRAIN_CONFIG="${1:-${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_verifiable_rl.yaml}}"
+TRAIN_CONFIG="${1:-${TRAIN_CONFIG:-training_args/train_coconut_generator_interaction_gated_router_ce.yaml}}"
 
 ACCOUNT="${ACCOUNT:-}"
 PARTITION="${PARTITION:-}"

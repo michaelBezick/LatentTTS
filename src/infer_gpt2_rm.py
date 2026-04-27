@@ -12,6 +12,11 @@ from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from fire import Fire
 
+try:
+    from peft import PeftModel
+except ImportError:  # pragma: no cover - PEFT is a required repo dependency.
+    PeftModel = None
+
 from .generation_mixin import LatentGenerationMixin, LatentGenerationConfig
 from .model_registry import MODELS
 from .models.gpt2 import COCONUTGPT2ForTokenClassification
@@ -170,14 +175,19 @@ def main(
     seed: int = 200,
     sort_by_len: bool = True,
     progress_bar: bool = True,
-    generator_communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    generator_communication_type: Literal["none", "mean", "attention", "router", "gated_router"] = "none",
     generator_communication_checkpoint: str | None = None,
+    generator_adapter_checkpoint: str | None = None,
     generator_communication_attention_heads: int = 4,
     generator_communication_topk: int = 2,
+    generator_communication_gate_bias: float = -4.0,
+    generator_communication_interaction_scale: float = 1.0,
     generator_communication_every: int = 1,
-    communication_type: Literal["none", "mean", "attention", "router"] = "none",
+    communication_type: Literal["none", "mean", "attention", "router", "gated_router"] = "none",
     communication_attention_heads: int = 4,
     communication_topk: int = 2,
+    communication_gate_bias: float = -4.0,
+    communication_interaction_scale: float = 1.0,
     report_pairwise_cosine: bool = False,
     pairwise_cosine_pool: Literal["mean", "last"] = "mean",
     pairwise_collapse_threshold: float = 0.9,
@@ -260,6 +270,8 @@ def main(
             d_model=model.config.hidden_size,
             n_heads=generator_communication_attention_heads,
             topk=generator_communication_topk,
+            gate_bias=generator_communication_gate_bias,
+            interaction_scale=generator_communication_interaction_scale,
         )
         if generator_communication_checkpoint is not None:
             restored = restore_communication_module_from_checkpoint(
@@ -273,6 +285,13 @@ def main(
         model.communication_module = model.communication_module.to(
             device=model.device, dtype=model.dtype
         )
+    if generator_adapter_checkpoint is not None:
+        if PeftModel is None:
+            raise ImportError("PEFT is required to load generator_adapter_checkpoint")
+        generator_device = model.device
+        generator_dtype = model.dtype
+        model = PeftModel.from_pretrained(model, generator_adapter_checkpoint)
+        model = model.to(device=generator_device, dtype=generator_dtype)
     if prm_model_family == "llama":
 
         prm_processing_class = AutoTokenizer.from_pretrained(prm_id)
@@ -313,6 +332,8 @@ def main(
             d_model=prm.config.hidden_size,
             n_heads=communication_attention_heads,
             topk=communication_topk,
+            gate_bias=communication_gate_bias,
+            interaction_scale=communication_interaction_scale,
         )
         restore_communication_module_from_checkpoint(
             module_owner=prm,
