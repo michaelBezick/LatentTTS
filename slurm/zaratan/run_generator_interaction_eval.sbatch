@@ -6,6 +6,9 @@ GENERATOR_TYPE="${GENERATOR_TYPE:-coconut}"
 PRM_ID="${PRM_ID:-checkpoints/latentRM}"
 DATA_PATH="${DATA_PATH:-data/gsm_valid.json}"
 NUM_RETURN_SEQUENCES="${NUM_RETURN_SEQUENCES:-8}"
+SAMPLING_BY="${SAMPLING_BY:-dropout}"
+NOISE_STD="${NOISE_STD:-}"
+DROPOUT_P="${DROPOUT_P:-}"
 GENERATOR_INTERACTION_TYPE="${GENERATOR_INTERACTION_TYPE:-gated_router}"
 GENERATOR_INTERACTION_CHECKPOINT="${GENERATOR_INTERACTION_CHECKPOINT:-outputs/coconut-generator-interaction-gated-router-ce/best}"
 GENERATOR_ADAPTER_CHECKPOINT="${GENERATOR_ADAPTER_CHECKPOINT:-outputs/coconut-generator-interaction-gated-router-ce/best/generator_adapter}"
@@ -27,6 +30,7 @@ echo "generator_type: ${GENERATOR_TYPE}"
 echo "prm_id: ${PRM_ID}"
 echo "data_path: ${DATA_PATH}"
 echo "num_return_sequences: ${NUM_RETURN_SEQUENCES}"
+echo "sampling_by: ${SAMPLING_BY}"
 echo "generator_interaction_type: ${GENERATOR_INTERACTION_TYPE}"
 echo "generator_interaction_checkpoint: ${GENERATOR_INTERACTION_CHECKPOINT}"
 echo "generator_adapter_checkpoint: ${GENERATOR_ADAPTER_CHECKPOINT}"
@@ -50,6 +54,7 @@ cmd=(
     --data_path="${DATA_PATH}"
     --num_return_sequences="${NUM_RETURN_SEQUENCES}"
     --seed="${SEED}"
+    --sampling_by="${SAMPLING_BY}"
     --communication_type="${RM_INTERACTION_TYPE}"
     --generator_communication_type="${GENERATOR_INTERACTION_TYPE}"
     --generator_communication_attention_heads="${GENERATOR_INTERACTION_ATTENTION_HEADS}"
@@ -64,6 +69,12 @@ if [[ -n "${GENERATOR_INTERACTION_CHECKPOINT}" ]]; then
 fi
 if [[ -n "${GENERATOR_ADAPTER_CHECKPOINT}" ]]; then
     cmd+=(--generator_adapter_checkpoint="${GENERATOR_ADAPTER_CHECKPOINT}")
+fi
+if [[ -n "${NOISE_STD}" ]]; then
+    cmd+=(--noise_std="${NOISE_STD}")
+fi
+if [[ -n "${DROPOUT_P}" ]]; then
+    cmd+=(--dropout_p="${DROPOUT_P}")
 fi
 
 printf 'Running: %s\n' "${cmd[*]}"

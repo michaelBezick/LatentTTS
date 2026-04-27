@@ -48,7 +48,7 @@ class LatentGenerateDecoderOnlyOutput(GenerateDecoderOnlyOutput):
 
 class LatentGenerationConfig(GenerationConfig):
     num_latent_paths: int | None = None
-    communication_type: Literal["none", "mean", "attention", "router", "gated_router"] = "none"
+    communication_type: Literal["none", "mean", "attention", "router", "gated_router", "steering"] = "none"
     communication_every: int = 1
     latent_length: int | None = None
     max_latent_length: int | None = None

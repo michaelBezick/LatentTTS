@@ -152,13 +152,14 @@ class TopKRouterCommunication(BaseCommunication):
         scores = self.score(x).squeeze(-1)  # [B, N]
         if alive_mask is not None:
             scores = scores.masked_fill(~alive_mask, float("-inf"))
-        top_idx = scores.topk(k=min(self.topk, x.size(1)), dim=1).indices
+        top_scores, top_idx = scores.topk(k=min(self.topk, x.size(1)), dim=1)
+        top_weights = torch.softmax(top_scores, dim=1).unsqueeze(-1)
         gathered = torch.gather(
             routed,
             1,
             top_idx.unsqueeze(-1).expand(-1, -1, routed.size(-1))
         )
-        summary = gathered.mean(dim=1, keepdim=True)
+        summary = (gathered * top_weights).sum(dim=1, keepdim=True)
         out = self.ln(x + summary)
         if return_weights:
             return out, None
@@ -185,17 +186,57 @@ class GatedTopKRouterCommunication(BaseCommunication):
         scores = self.score(x).squeeze(-1)  # [B, N]
         if alive_mask is not None:
             scores = scores.masked_fill(~alive_mask, float("-inf"))
-        top_idx = scores.topk(k=min(self.topk, x.size(1)), dim=1).indices
+        top_scores, top_idx = scores.topk(k=min(self.topk, x.size(1)), dim=1)
+        top_weights = torch.softmax(top_scores, dim=1).unsqueeze(-1)
         gathered = torch.gather(
             routed,
             1,
             top_idx.unsqueeze(-1).expand(-1, -1, routed.size(-1))
         )
-        summary = gathered.mean(dim=1, keepdim=True).expand_as(x)
+        summary = (gathered * top_weights).sum(dim=1, keepdim=True).expand_as(x)
         gate = torch.sigmoid(self.gate(x))
         out = x + self.interaction_scale * gate * self.delta(summary)
         if return_weights:
             return out, None
+        return out
+
+
+class SteeringResidualCommunication(BaseCommunication):
+    """Bounded per-path steering policy over the current K latent states.
+
+    The attention block is used only to build an observation for each path. The
+    module then emits a small residual action, keeping the gaussian sampling
+    distribution centered near the generator's native representation space.
+    """
+
+    def __init__(self, d_model, n_heads=4, gate_bias=-4.0, interaction_scale=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.context_ln = nn.LayerNorm(d_model)
+        self.delta = nn.Linear(d_model, d_model)
+        self.gate = nn.Linear(d_model, 1)
+        self.interaction_scale = interaction_scale
+        nn.init.zeros_(self.delta.weight)
+        nn.init.zeros_(self.delta.bias)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, gate_bias)
+
+    def forward(self, x, alive_mask=None, step_idx=None, return_weights=False):
+        key_padding_mask = None if alive_mask is None else ~alive_mask
+        context, attn_weights = self.attn(
+            x,
+            x,
+            x,
+            key_padding_mask=key_padding_mask,
+            need_weights=return_weights,
+            average_attn_weights=True,
+        )
+        context = self.context_ln(x + context)
+        action = torch.tanh(self.delta(context))
+        gate = torch.sigmoid(self.gate(x))
+        out = x + self.interaction_scale * gate * action
+        if return_weights:
+            return out, attn_weights
         return out
 
 
@@ -219,6 +260,13 @@ def build_communication_module(
         return GatedTopKRouterCommunication(
             d_model=d_model,
             topk=topk,
+            gate_bias=gate_bias,
+            interaction_scale=interaction_scale,
+        )
+    if communication_type == "steering":
+        return SteeringResidualCommunication(
+            d_model=d_model,
+            n_heads=n_heads,
             gate_bias=gate_bias,
             interaction_scale=interaction_scale,
         )

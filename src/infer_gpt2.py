@@ -35,7 +35,7 @@ def main(
     sampling_by: Literal["dropout", "noise"] = "dropout",
     noise_std: float | None = None,
     dropout_p: float | None = None,
-    generator_communication_type: Literal["none", "mean", "attention", "router", "gated_router"] = "none",
+    generator_communication_type: Literal["none", "mean", "attention", "router", "gated_router", "steering"] = "none",
     generator_communication_checkpoint: str = "",
     generator_communication_attention_heads: int = 4,
     generator_communication_topk: int = 2,

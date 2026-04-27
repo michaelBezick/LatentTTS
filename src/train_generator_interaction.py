@@ -26,7 +26,6 @@ from src.model_registry import MODELS
 from src.models.coconut import COCONUTGPT2
 from src.models.gpt2 import COCONUTGPT2ForTokenClassification
 from src.models.communication import (
-    CrossPathAttentionCommunication,
     build_communication_module,
     restore_communication_module_from_checkpoint,
 )
@@ -48,7 +47,7 @@ class GeneratorInteractionConfig:
     num_return_sequences: int = field(default=8)
     latent_length: int = field(default=6)
     max_new_tokens: int = field(default=128)
-    communication_type: Literal["mean", "attention", "router", "gated_router"] = field(default="attention")
+    communication_type: Literal["mean", "attention", "router", "gated_router", "steering"] = field(default="attention")
     communication_attention_heads: int = field(default=4)
     communication_topk: int = field(default=2)
     communication_gate_bias: float = field(default=-4.0)
