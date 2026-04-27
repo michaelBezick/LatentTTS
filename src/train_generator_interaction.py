@@ -514,7 +514,7 @@ class GeneratorInteractionTrainer:
         for name, value in zip(prepare_names, prepared):
             setattr(self, name, value)
         self.generator = self.generator.to(self.accelerator.device)
-        if self.prm is not None and args.objective != "verifiable_rl":
+        if self.prm is not None and not self.train_prm:
             self.prm = self.prm.to(self.accelerator.device)
         self.diversity_loss_fct = DiversityPenaltyLoss()
         self.metric_names = self.get_metric_names()
