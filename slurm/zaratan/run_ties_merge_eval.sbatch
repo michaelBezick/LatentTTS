@@ -16,6 +16,8 @@ MERGE_MODE="${MERGE_MODE:-all_pairs}"
 USE_TASK_VECTORS="${USE_TASK_VECTORS:-False}"
 ACCEPTANCE_MARGIN="${ACCEPTANCE_MARGIN:-0.0}"
 MERGE_SCORE_CHUNK_SIZE="${MERGE_SCORE_CHUNK_SIZE:-64}"
+MERGE_SELECTION_MODE="${MERGE_SELECTION_MODE:-decoded_rerank}"
+MERGE_DECODE_BATCH_SIZE="${MERGE_DECODE_BATCH_SIZE:-64}"
 
 mkdir -p "${REPO_ROOT}/logs/slurm"
 cd "${REPO_ROOT}"
@@ -34,6 +36,8 @@ echo "merge_mode: ${MERGE_MODE}"
 echo "use_task_vectors: ${USE_TASK_VECTORS}"
 echo "acceptance_margin: ${ACCEPTANCE_MARGIN}"
 echo "merge_score_chunk_size: ${MERGE_SCORE_CHUNK_SIZE}"
+echo "merge_selection_mode: ${MERGE_SELECTION_MODE}"
+echo "merge_decode_batch_size: ${MERGE_DECODE_BATCH_SIZE}"
 echo "slurm_job_id: ${SLURM_JOB_ID:-unknown}"
 
 source ~/.bashrc.conda
@@ -57,6 +61,8 @@ cmd=(
     --use_task_vectors="${USE_TASK_VECTORS}"
     --acceptance_margin="${ACCEPTANCE_MARGIN}"
     --merge_score_chunk_size="${MERGE_SCORE_CHUNK_SIZE}"
+    --merge_selection_mode="${MERGE_SELECTION_MODE}"
+    --merge_decode_batch_size="${MERGE_DECODE_BATCH_SIZE}"
 )
 
 if [[ -n "${NOISE_STD}" ]];  then cmd+=(--noise_std="${NOISE_STD}");   fi

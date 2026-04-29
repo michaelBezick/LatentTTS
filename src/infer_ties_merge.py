@@ -18,35 +18,54 @@ from .utils import set_seed, InferenceCollator
 
 
 @torch.no_grad()
-def _decode_with_fixed_latent(
+def _decode_with_fixed_latents(
     model,
-    prompt_ids: torch.Tensor,   # [S] unpadded prompt input_ids
-    merged_lat: torch.Tensor,   # [L, D] merged latent embedding
+    prompt_ids: list[torch.Tensor],   # each [S] unpadded prompt input_ids
+    merged_lats: list[torch.Tensor],  # each [L, D] merged latent embedding
     latent_id: int,
-    latent_length: int,
     gen_config: LatentGenerationConfig,
     tokenizer,
-) -> str:
-    """Decode text by injecting a fixed merged latent into the prefill KV-cache.
+) -> list[str]:
+    """Decode text by injecting fixed merged latents into the prefill KV-cache.
 
-    Constructs full_ids = [prompt | latent_id * L] and full_embs = [prompt_embs |
-    merged_lat]. The generation mixin sees latent_sequences_end=True on the first
-    step, forces <|end-latent|>, then generates text greedily from the KV-cache
-    that was built with the merged latent embeddings.
+    Constructs left-padded full_ids = [prompt | latent_id * L] and overwrites the
+    latent token embeddings with merged_lats. The generation mixin sees
+    latent_sequences_end=True on the first step, forces <|end-latent|>, then
+    generates text greedily from the KV-cache built with the merged embeddings.
     """
-    device = model.device
-    L = merged_lat.shape[0]
+    if not merged_lats:
+        return []
 
-    p_ids = prompt_ids.unsqueeze(0).to(device)                              # [1, S]
-    lat_ids = torch.full((1, L), latent_id, dtype=p_ids.dtype, device=device)
-    full_ids = torch.cat([p_ids, lat_ids], dim=1)                           # [1, S+L]
+    device = model.device
+    dtype = model.dtype
+    lengths = {lat.shape[0] for lat in merged_lats}
+    if len(lengths) != 1:
+        raise ValueError(f"Expected equal latent lengths, got {sorted(lengths)}")
+    latent_length = lengths.pop()
+    full_lengths = [len(ids) + latent_length for ids in prompt_ids]
+    max_len = max(full_lengths)
+    batch_size = len(merged_lats)
+
+    full_ids = torch.full(
+        (batch_size, max_len),
+        tokenizer.pad_token_id,
+        dtype=prompt_ids[0].dtype,
+        device=device,
+    )
+    full_attn = torch.zeros(batch_size, max_len, device=device, dtype=torch.long)
+
+    for row, (ids, lat) in enumerate(zip(prompt_ids, merged_lats, strict=True)):
+        ids = ids.to(device)
+        lat_ids = torch.full((latent_length,), latent_id, dtype=ids.dtype, device=device)
+        row_ids = torch.cat([ids, lat_ids], dim=0)
+        start = max_len - row_ids.numel()
+        full_ids[row, start:] = row_ids
+        full_attn[row, start:] = 1
 
     emb = model.get_input_embeddings()
-    p_embs = emb(p_ids)                                                     # [1, S, D]
-    m_embs = merged_lat.to(device=device, dtype=model.dtype).unsqueeze(0)  # [1, L, D]
-    full_embs = torch.cat([p_embs, m_embs], dim=1)                         # [1, S+L, D]
-
-    full_attn = torch.ones(1, full_ids.shape[1], device=device, dtype=torch.long)
+    full_embs = emb(torch.where(full_ids == latent_id, 0, full_ids))
+    for row, lat in enumerate(merged_lats):
+        full_embs[row, -latent_length:] = lat.to(device=device, dtype=dtype)
 
     out = model.generate(
         input_ids=full_ids,
@@ -57,7 +76,7 @@ def _decode_with_fixed_latent(
         return_dict_in_generate=False,
         use_cache=True,
     )
-    return tokenizer.decode(out[0], skip_special_tokens=True)
+    return tokenizer.batch_decode(out, skip_special_tokens=True)
 
 
 def synchronize_device(device: torch.device) -> None:
@@ -117,6 +136,42 @@ def choose_ties_correctness(
     return base_correct, accepted, score_gain if accepted else 0.0
 
 
+def choose_decoded_ties_correctness(
+    base_correct: bool,
+    best_original_score: float,
+    merged_scores: torch.Tensor,
+    merged_correct: torch.Tensor,
+    acceptance_margin: float,
+) -> tuple[bool, bool, float, bool]:
+    """Select decoded TIES correctness by strict-margin PRM reranking."""
+    if len(merged_scores) == 0:
+        return base_correct, False, 0.0, False
+
+    best_merged_idx = merged_scores.argmax().item()
+    best_merged_score = merged_scores[best_merged_idx].item()
+    score_gain = best_merged_score - best_original_score
+    accepted = best_merged_score > best_original_score + acceptance_margin
+    best_merged_correct = bool(merged_correct[best_merged_idx].item())
+    selected_correct = best_merged_correct if accepted else base_correct
+    return selected_correct, accepted, score_gain if accepted else 0.0, best_merged_correct
+
+
+def score_only_ties_correctness(
+    base_correct: bool,
+    best_original_score: float,
+    merged_scores: torch.Tensor,
+    acceptance_margin: float,
+) -> tuple[bool, bool, float, bool]:
+    """Compatibility wrapper for the old score-only diagnostic behavior."""
+    selected_correct, accepted, score_gain = choose_ties_correctness(
+        base_correct=base_correct,
+        best_original_score=best_original_score,
+        merged_scores=merged_scores,
+        acceptance_margin=acceptance_margin,
+    )
+    return selected_correct, accepted, score_gain, False
+
+
 def score_prm_latents(
     prm,
     input_ids: torch.Tensor,
@@ -162,21 +217,26 @@ def main(
     use_task_vectors: bool = False,
     acceptance_margin: float = 0.0,
     merge_score_chunk_size: int = 64,
+    merge_selection_mode: Literal["decoded_rerank", "score_only"] = "decoded_rerank",
+    merge_decode_batch_size: int = 64,
 ):
     """Best-of-N inference with post-generation TIES latent merging.
 
     Generates num_return_sequences trajectories per example, scores all with
-    latentRM, then for each pair applies a TIES merge (dominant same-sign
-    coordinates averaged, rest kept from the higher-scoring trajectory) and
-    re-scores. Accepts a merge only when it beats the best original score.
-    Reports both base best-of-N accuracy and TIES accuracy.
+    latentRM, then for each best-anchored pair applies a TIES merge. In the
+    default decoded_rerank mode, merged latents are injected back into the
+    generator and decoded into new answers before PRM scoring. score_only keeps
+    the old diagnostic behavior: re-score merged latents against the base
+    decoded text and preserve base correctness.
 
     merge_mode="all_pairs"  — try all pairs anchored on the best trajectory
     merge_mode="greedy"     — try only the top-2 scoring pair (1 extra RM call)
     use_task_vectors=True   — apply TIES to (emb - mean_emb) instead of raw embs
     acceptance_margin        accept only if merged_score > best_score + margin
+    merge_selection_mode     decoded_rerank decodes merges; score_only is diagnostic
     """
     assert num_return_sequences > 1, "num_return_sequences must be > 1 for merging"
+    assert merge_decode_batch_size > 0, "merge_decode_batch_size must be > 0"
     batch_size = max(1, batch_size // num_return_sequences)
 
     set_seed(seed)
@@ -264,7 +324,10 @@ def main(
     base_accuracies = {}
     ties_accuracies = {}
     all_corrects = {}
+    merged_oracle_corrects = {}
     total_merge_accepted = 0
+    total_merge_accepted_correct = 0
+    total_merge_accepted_incorrect = 0
     total_pairs_tried = 0
     total_merge_gain = 0.0
 
@@ -272,6 +335,7 @@ def main(
         "num_batches": 0,
         "num_examples": 0,
         "generation_time_sec": 0.0,
+        "merge_decode_time_sec": 0.0,
         "prm_initial_time_sec": 0.0,
         "prm_merge_time_sec": 0.0,
         "wall_time_sec": 0.0,
@@ -336,10 +400,12 @@ def main(
         # --- Build TIES merge candidates ---
         latent_thoughts = output.latent_thoughts.cpu()  # [B*N, L, D]
         seq_ids_cpu = inputs["input_ids"].cpu()         # [B*N, S]
+        prompt_ids_cpu = batch["input_ids"].cpu()
         B_orig = original_scores.shape[0]
 
         all_merged_latents = []  # [L, D] each
         all_merged_ids = []      # [S] each
+        all_merged_prompt_ids = []  # [P] each
         merge_info = []          # (b, base_traj_idx)
         merge_counts = []
 
@@ -362,17 +428,60 @@ def main(
 
                 all_merged_latents.append(merged.to(lats_b.dtype))
                 all_merged_ids.append(ids_b[base_traj_idx])
+                prompt_ids_b = prompt_ids_cpu[b][prompt_ids_cpu[b] != processing_class.pad_token_id]
+                all_merged_prompt_ids.append(prompt_ids_b)
                 merge_info.append((b, base_traj_idx))
 
-        # --- Score all merged pairs ---
+        # --- Decode and score all merged pairs ---
+        if merge_selection_mode == "decoded_rerank":
+            synchronize_device(model.device)
+            merge_decode_start = time.perf_counter()
+            merged_text_output = []
+            for c_start in range(0, len(all_merged_latents), merge_decode_batch_size):
+                c_end = min(c_start + merge_decode_batch_size, len(all_merged_latents))
+                merged_text_output.extend(
+                    _decode_with_fixed_latents(
+                        model=model,
+                        prompt_ids=all_merged_prompt_ids[c_start:c_end],
+                        merged_lats=all_merged_latents[c_start:c_end],
+                        latent_id=latent_id,
+                        gen_config=generation_config,
+                        tokenizer=processing_class,
+                    )
+                )
+            synchronize_device(model.device)
+            timing_stats["merge_decode_time_sec"] += time.perf_counter() - merge_decode_start
+
+            if merged_text_output:
+                merged_inputs = processing_class(merged_text_output, return_tensors="pt", padding=True)
+                merged_answer_output = [
+                    MODELS[generator_type]["answer_extractor"](t) for t in merged_text_output
+                ]
+                merged_correct = torch.tensor([
+                    merged_answer_output[k] == batch["answer"][merge_info[k][0]]
+                    for k in range(len(merged_answer_output))
+                ])
+            else:
+                merged_inputs = None
+                merged_correct = torch.empty(0, dtype=torch.bool)
+        elif merge_selection_mode == "score_only":
+            merged_inputs = None
+            merged_correct = torch.empty(len(all_merged_latents), dtype=torch.bool)
+        else:
+            raise ValueError(f"Unsupported merge_selection_mode={merge_selection_mode!r}")
+
         synchronize_device(prm.device)
         merge_score_start = time.perf_counter()
         all_merged_scores_parts = []
         for c_start in range(0, len(all_merged_latents), merge_score_chunk_size):
             c_end = min(c_start + merge_score_chunk_size, len(all_merged_latents))
             chunk_lats = [all_merged_latents[k].to(prm.device) for k in range(c_start, c_end)]
-            chunk_ids = torch.stack(all_merged_ids[c_start:c_end]).to(prm.device)
-            chunk_attn = (chunk_ids != processing_class.pad_token_id).long()
+            if merge_selection_mode == "decoded_rerank":
+                chunk_ids = merged_inputs["input_ids"][c_start:c_end].to(prm.device)
+                chunk_attn = merged_inputs["attention_mask"][c_start:c_end].to(prm.device)
+            else:
+                chunk_ids = torch.stack(all_merged_ids[c_start:c_end]).to(prm.device)
+                chunk_attn = (chunk_ids != processing_class.pad_token_id).long()
             chunk_scores = score_prm_latents(
                 prm=prm,
                 input_ids=chunk_ids,
@@ -398,23 +507,42 @@ def main(
             all_corrects[_idx] = correct[b].tolist()
 
             merged_scores_b = all_merged_scores[pair_offset:pair_end]
+            merged_correct_b = merged_correct[pair_offset:pair_end]
             total_pairs_tried += merge_counts[b]
 
-            ties_correct, accepted, score_gain = choose_ties_correctness(
-                base_correct=base_correct,
-                best_original_score=scores_b[base_best_idx].item(),
-                merged_scores=merged_scores_b,
-                acceptance_margin=acceptance_margin,
-            )
+            if merge_selection_mode == "decoded_rerank":
+                ties_correct, accepted, score_gain, best_merged_correct = choose_decoded_ties_correctness(
+                    base_correct=base_correct,
+                    best_original_score=scores_b[base_best_idx].item(),
+                    merged_scores=merged_scores_b,
+                    merged_correct=merged_correct_b,
+                    acceptance_margin=acceptance_margin,
+                )
+            else:
+                ties_correct, accepted, score_gain, best_merged_correct = score_only_ties_correctness(
+                    base_correct=base_correct,
+                    best_original_score=scores_b[base_best_idx].item(),
+                    merged_scores=merged_scores_b,
+                    acceptance_margin=acceptance_margin,
+                )
             ties_accuracies[_idx] = ties_correct
+            merged_oracle_corrects[_idx] = bool(
+                trajectory_has_any_correct(correct[b]) or trajectory_has_any_correct(merged_correct_b)
+            )
             if accepted:
                 if merge_info:
                     _, base_traj_idx = merge_info[pair_offset + merged_scores_b.argmax().item()]
                     assert base_traj_idx == base_best_idx
                 total_merge_accepted += 1
                 total_merge_gain += score_gain
+                if best_merged_correct:
+                    total_merge_accepted_correct += 1
+                else:
+                    total_merge_accepted_incorrect += 1
 
         del output, inputs, latent_thoughts
+        if merge_selection_mode == "decoded_rerank":
+            del merged_inputs
         torch.cuda.empty_cache()
 
         if accelerator.is_main_process and progress_bar:
@@ -424,7 +552,7 @@ def main(
             pbar.set_postfix({
                 "Base": f"{base_sum/n*100:.2f}%",
                 "TIES": f"{ties_sum/n*100:.2f}%",
-                "Acc": f"{total_merge_accepted}/{total_pairs_tried}",
+                "Accepted": f"{total_merge_accepted}/{total_pairs_tried}",
             })
 
     accelerator.wait_for_everyone()
@@ -438,15 +566,21 @@ def main(
         ties_accuracies = {idx: v for d in ties_accuracies for idx, v in d.items()}
         all_corrects = accelerator.gather_for_metrics([all_corrects], use_gather_object=True)
         all_corrects = {idx: v for d in all_corrects for idx, v in d.items()}
+        merged_oracle_corrects = accelerator.gather_for_metrics([merged_oracle_corrects], use_gather_object=True)
+        merged_oracle_corrects = {idx: v for d in merged_oracle_corrects for idx, v in d.items()}
         merge_stats = accelerator.gather_for_metrics(
             [{
                 "accepted": total_merge_accepted,
+                "accepted_correct": total_merge_accepted_correct,
+                "accepted_incorrect": total_merge_accepted_incorrect,
                 "pairs_tried": total_pairs_tried,
                 "gain": total_merge_gain,
             }],
             use_gather_object=True,
         )
         total_merge_accepted = sum(s["accepted"] for s in merge_stats)
+        total_merge_accepted_correct = sum(s["accepted_correct"] for s in merge_stats)
+        total_merge_accepted_incorrect = sum(s["accepted_incorrect"] for s in merge_stats)
         total_pairs_tried = sum(s["pairs_tried"] for s in merge_stats)
         total_merge_gain = sum(s["gain"] for s in merge_stats)
         timing_stats = accelerator.gather_for_metrics([timing_stats], use_gather_object=True)
@@ -458,26 +592,39 @@ def main(
         base_arr = np.array(list(base_accuracies.values()))
         ties_arr = np.array(list(ties_accuracies.values()))
         coverage = float(np.array([trajectory_has_any_correct(v) for v in all_corrects.values()]).mean())
+        merged_oracle_coverage = float(np.array(list(merged_oracle_corrects.values())).mean())
 
         print(f"Base Best-of-{N} Accuracy: {base_arr.mean()*100:.4f}%")
-        print(f"TIES Merge Accuracy:        {ties_arr.mean()*100:.4f}%")
-        print(f"Coverage (any correct):     {coverage*100:.4f}%")
+        if merge_selection_mode == "decoded_rerank":
+            print(f"TIES Decoded Merge Accuracy: {ties_arr.mean()*100:.4f}%")
+        else:
+            print(f"TIES Merge Accuracy:        {ties_arr.mean()*100:.4f}%")
+        print(f"Coverage:                   {coverage*100:.4f}%")
+        print(f"Merged Oracle Coverage:     {merged_oracle_coverage*100:.4f}%")
         print(f"Merge Accept Rate:          {safe_divide(total_merge_accepted, total_pairs_tried)*100:.4f}%"
               f" ({total_merge_accepted}/{total_pairs_tried})")
+        print(
+            "Accepted Merges Correct/Incorrect: "
+            f"{total_merge_accepted_correct}/{total_merge_accepted_incorrect}"
+        )
         if total_merge_accepted > 0:
             print(f"Avg Score Gain (accepted):  {total_merge_gain / total_merge_accepted:.6f}")
         print(
             "Merge Mode: "
             f"{merge_mode}, top_k_ratio={top_k_ratio}, use_task_vectors={use_task_vectors}, "
-            f"acceptance_margin={acceptance_margin}"
+            f"acceptance_margin={acceptance_margin}, merge_selection_mode={merge_selection_mode}"
         )
 
         wall = max(s["wall_time_sec"] for s in timing_stats)
         gen = max(s["generation_time_sec"] for s in timing_stats)
+        merge_decode = max(s["merge_decode_time_sec"] for s in timing_stats)
         prm_init = max(s["prm_initial_time_sec"] for s in timing_stats)
         prm_merge = max(s["prm_merge_time_sec"] for s in timing_stats)
         n_ex = sum(s["num_examples"] for s in timing_stats)
-        print(f"Wall Time (s): {wall:.2f} | Gen: {gen:.2f} | PRM-init: {prm_init:.2f} | PRM-merge: {prm_merge:.2f}")
+        print(
+            f"Wall Time (s): {wall:.2f} | Gen: {gen:.2f} | Merge-decode: {merge_decode:.2f} "
+            f"| PRM-init: {prm_init:.2f} | PRM-merge: {prm_merge:.2f}"
+        )
         print(f"Throughput: {safe_divide(n_ex, wall):.2f} examples/s")
 
 
