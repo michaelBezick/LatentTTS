@@ -14,6 +14,7 @@ SEED="${SEED:-200}"
 TOP_K_RATIO="${TOP_K_RATIO:-0.2}"
 MERGE_MODE="${MERGE_MODE:-all_pairs}"
 USE_TASK_VECTORS="${USE_TASK_VECTORS:-False}"
+ACCEPTANCE_MARGIN="${ACCEPTANCE_MARGIN:-0.0}"
 MERGE_SCORE_CHUNK_SIZE="${MERGE_SCORE_CHUNK_SIZE:-64}"
 
 mkdir -p "${REPO_ROOT}/logs/slurm"
@@ -31,6 +32,7 @@ echo "seed: ${SEED}"
 echo "top_k_ratio: ${TOP_K_RATIO}"
 echo "merge_mode: ${MERGE_MODE}"
 echo "use_task_vectors: ${USE_TASK_VECTORS}"
+echo "acceptance_margin: ${ACCEPTANCE_MARGIN}"
 echo "merge_score_chunk_size: ${MERGE_SCORE_CHUNK_SIZE}"
 echo "slurm_job_id: ${SLURM_JOB_ID:-unknown}"
 
@@ -53,6 +55,7 @@ cmd=(
     --top_k_ratio="${TOP_K_RATIO}"
     --merge_mode="${MERGE_MODE}"
     --use_task_vectors="${USE_TASK_VECTORS}"
+    --acceptance_margin="${ACCEPTANCE_MARGIN}"
     --merge_score_chunk_size="${MERGE_SCORE_CHUNK_SIZE}"
 )
 

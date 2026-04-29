@@ -17,6 +17,49 @@ from .models.ties_merge import ties_merge_pair, ties_merge_pair_task_vector
 from .utils import set_seed, InferenceCollator
 
 
+@torch.no_grad()
+def _decode_with_fixed_latent(
+    model,
+    prompt_ids: torch.Tensor,   # [S] unpadded prompt input_ids
+    merged_lat: torch.Tensor,   # [L, D] merged latent embedding
+    latent_id: int,
+    latent_length: int,
+    gen_config: LatentGenerationConfig,
+    tokenizer,
+) -> str:
+    """Decode text by injecting a fixed merged latent into the prefill KV-cache.
+
+    Constructs full_ids = [prompt | latent_id * L] and full_embs = [prompt_embs |
+    merged_lat]. The generation mixin sees latent_sequences_end=True on the first
+    step, forces <|end-latent|>, then generates text greedily from the KV-cache
+    that was built with the merged latent embeddings.
+    """
+    device = model.device
+    L = merged_lat.shape[0]
+
+    p_ids = prompt_ids.unsqueeze(0).to(device)                              # [1, S]
+    lat_ids = torch.full((1, L), latent_id, dtype=p_ids.dtype, device=device)
+    full_ids = torch.cat([p_ids, lat_ids], dim=1)                           # [1, S+L]
+
+    emb = model.get_input_embeddings()
+    p_embs = emb(p_ids)                                                     # [1, S, D]
+    m_embs = merged_lat.to(device=device, dtype=model.dtype).unsqueeze(0)  # [1, L, D]
+    full_embs = torch.cat([p_embs, m_embs], dim=1)                         # [1, S+L, D]
+
+    full_attn = torch.ones(1, full_ids.shape[1], device=device, dtype=torch.long)
+
+    out = model.generate(
+        input_ids=full_ids,
+        attention_mask=full_attn,
+        inputs_embeds=full_embs,
+        generation_config=gen_config,
+        num_return_sequences=1,
+        return_dict_in_generate=False,
+        use_cache=True,
+    )
+    return tokenizer.decode(out[0], skip_special_tokens=True)
+
+
 def synchronize_device(device: torch.device) -> None:
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(device)
@@ -30,6 +73,71 @@ def trajectory_has_any_correct(value) -> bool:
     if isinstance(value, torch.Tensor):
         return bool(value.any().item())
     return any(value)
+
+
+def build_best_anchored_pairs(scores: torch.Tensor, merge_mode: str) -> tuple[int, list[tuple[int, int]]]:
+    """Return merge pairs that always keep the global-best trajectory as base."""
+    if scores.ndim != 1:
+        raise ValueError(f"Expected 1D scores, got shape {tuple(scores.shape)}")
+    if scores.numel() < 2:
+        raise ValueError("At least two trajectories are required for TIES merging")
+
+    sorted_idx = scores.argsort(descending=True)
+    best_idx = sorted_idx[0].item()
+
+    if merge_mode == "greedy":
+        return best_idx, [(best_idx, sorted_idx[1].item())]
+    if merge_mode == "all_pairs":
+        return best_idx, [(best_idx, j) for j in range(scores.numel()) if j != best_idx]
+    raise ValueError(f"Unsupported merge_mode={merge_mode!r}")
+
+
+def merge_count_offsets(counts: list[int]) -> list[tuple[int, int]]:
+    offsets = []
+    offset = 0
+    for count in counts:
+        offsets.append((offset, offset + count))
+        offset += count
+    return offsets
+
+
+def choose_ties_correctness(
+    base_correct: bool,
+    best_original_score: float,
+    merged_scores: torch.Tensor,
+    acceptance_margin: float,
+) -> tuple[bool, bool, float]:
+    """Select diagnostic TIES correctness while preserving the base answer."""
+    if len(merged_scores) == 0:
+        return base_correct, False, 0.0
+
+    max_merged_score = merged_scores.max().item()
+    score_gain = max_merged_score - best_original_score
+    accepted = max_merged_score > best_original_score + acceptance_margin
+    return base_correct, accepted, score_gain if accepted else 0.0
+
+
+def score_prm_latents(
+    prm,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    latent_embeds,
+    trajectory_group_size: int = 1,
+) -> torch.Tensor:
+    prm_out = prm(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        latent_embeds=latent_embeds,
+        trajectory_group_size=trajectory_group_size,
+        return_dict=True,
+    )
+    prm_scores = prm_out.logits.squeeze(-1)
+    prm_scores = torch.where(
+        input_ids == prm.config.latent_id,
+        prm_scores,
+        torch.zeros_like(prm_scores),
+    ).sum(dim=-1)
+    return prm_scores
 
 
 @torch.no_grad()
@@ -52,6 +160,7 @@ def main(
     top_k_ratio: float = 0.2,
     merge_mode: Literal["all_pairs", "greedy"] = "all_pairs",
     use_task_vectors: bool = False,
+    acceptance_margin: float = 0.0,
     merge_score_chunk_size: int = 64,
 ):
     """Best-of-N inference with post-generation TIES latent merging.
@@ -62,9 +171,10 @@ def main(
     re-scores. Accepts a merge only when it beats the best original score.
     Reports both base best-of-N accuracy and TIES accuracy.
 
-    merge_mode="all_pairs"  — try all C(k,2) pairs (O(k^2) extra RM calls)
+    merge_mode="all_pairs"  — try all pairs anchored on the best trajectory
     merge_mode="greedy"     — try only the top-2 scoring pair (1 extra RM call)
     use_task_vectors=True   — apply TIES to (emb - mean_emb) instead of raw embs
+    acceptance_margin        accept only if merged_score > best_score + margin
     """
     assert num_return_sequences > 1, "num_return_sequences must be > 1 for merging"
     batch_size = max(1, batch_size // num_return_sequences)
@@ -203,23 +313,18 @@ def main(
         # --- Initial RM scoring ---
         synchronize_device(prm.device)
         prm_init_start = time.perf_counter()
-        prm_out = prm(
-            input_ids=inputs["input_ids"].to(prm.device),
-            attention_mask=inputs["attention_mask"].to(prm.device),
+        prm_input_ids = inputs["input_ids"].to(prm.device)
+        prm_attention_mask = inputs["attention_mask"].to(prm.device)
+        prm_scores_raw = score_prm_latents(
+            prm=prm,
+            input_ids=prm_input_ids,
+            attention_mask=prm_attention_mask,
             latent_embeds=output.latent_thoughts.to(prm.device),
-            trajectory_group_size=N,
-            return_dict=True,
+            trajectory_group_size=1,
         )
-        prm_scores_raw = prm_out.logits.squeeze(-1)  # [B*N, S]
-        prm_scores_raw = torch.where(
-            (inputs["input_ids"] == prm.config.latent_id).to(prm.device),
-            prm_scores_raw,
-            torch.zeros_like(prm_scores_raw),
-        ).sum(dim=-1)  # [B*N]
         original_scores = prm_scores_raw.reshape(-1, N).cpu()  # [B, N]
         synchronize_device(prm.device)
         timing_stats["prm_initial_time_sec"] += time.perf_counter() - prm_init_start
-        del prm_out
 
         # --- Answers and correctness ---
         answer_output = [MODELS[generator_type]["answer_extractor"](t) for t in text_output]
@@ -236,25 +341,19 @@ def main(
         all_merged_latents = []  # [L, D] each
         all_merged_ids = []      # [S] each
         merge_info = []          # (b, base_traj_idx)
+        merge_counts = []
 
         for b in range(B_orig):
             lats_b = latent_thoughts[b * N:(b + 1) * N]  # [N, L, D]
             ids_b = seq_ids_cpu[b * N:(b + 1) * N]       # [N, S]
             scores_b = original_scores[b]                 # [N]
             mean_lat = lats_b.float().mean(dim=0) if use_task_vectors else None
-
-            if merge_mode == "greedy":
-                sorted_idx = scores_b.argsort(descending=True)
-                pairs_to_try = [(sorted_idx[0].item(), sorted_idx[1].item())]
-            else:
-                pairs_to_try = [(i, j) for i in range(N) for j in range(i + 1, N)]
+            base_traj_idx, pairs_to_try = build_best_anchored_pairs(scores_b, merge_mode)
+            merge_counts.append(len(pairs_to_try))
 
             for i, j in pairs_to_try:
-                base_i = i if scores_b[i] >= scores_b[j] else j
-                other_i = j if scores_b[i] >= scores_b[j] else i
-
-                emb_base = lats_b[base_i].float()
-                emb_other = lats_b[other_i].float()
+                emb_base = lats_b[i].float()
+                emb_other = lats_b[j].float()
 
                 if use_task_vectors:
                     merged = ties_merge_pair_task_vector(emb_base, emb_other, mean_lat, top_k_ratio)
@@ -262,8 +361,8 @@ def main(
                     merged = ties_merge_pair(emb_base, emb_other, top_k_ratio)
 
                 all_merged_latents.append(merged.to(lats_b.dtype))
-                all_merged_ids.append(ids_b[base_i])
-                merge_info.append((b, base_i))
+                all_merged_ids.append(ids_b[base_traj_idx])
+                merge_info.append((b, base_traj_idx))
 
         # --- Score all merged pairs ---
         synchronize_device(prm.device)
@@ -274,21 +373,14 @@ def main(
             chunk_lats = [all_merged_latents[k].to(prm.device) for k in range(c_start, c_end)]
             chunk_ids = torch.stack(all_merged_ids[c_start:c_end]).to(prm.device)
             chunk_attn = (chunk_ids != processing_class.pad_token_id).long()
-            chunk_out = prm(
+            chunk_scores = score_prm_latents(
+                prm=prm,
                 input_ids=chunk_ids,
                 attention_mask=chunk_attn,
                 latent_embeds=chunk_lats,
                 trajectory_group_size=1,
-                return_dict=True,
             )
-            chunk_scores = chunk_out.logits.squeeze(-1)  # [chunk, S]
-            chunk_scores = torch.where(
-                chunk_ids == prm.config.latent_id,
-                chunk_scores,
-                torch.zeros_like(chunk_scores),
-            ).sum(dim=-1)  # [chunk]
             all_merged_scores_parts.append(chunk_scores.cpu())
-            del chunk_out
         synchronize_device(prm.device)
         timing_stats["prm_merge_time_sec"] += time.perf_counter() - merge_score_start
 
@@ -297,13 +389,7 @@ def main(
         )
 
         # --- Select best per example ---
-        if merge_mode == "all_pairs":
-            pairs_per_example = N * (N - 1) // 2
-        else:
-            pairs_per_example = 1
-
-        pair_offset = 0
-        for b in range(B_orig):
+        for b, (pair_offset, pair_end) in enumerate(merge_count_offsets(merge_counts)):
             _idx = batch["idx"][b].item()
             scores_b = original_scores[b]
             base_best_idx = scores_b.argmax().item()
@@ -311,23 +397,22 @@ def main(
             base_accuracies[_idx] = base_correct
             all_corrects[_idx] = correct[b].tolist()
 
-            merged_scores_b = all_merged_scores[pair_offset:pair_offset + pairs_per_example]
-            total_pairs_tried += pairs_per_example
+            merged_scores_b = all_merged_scores[pair_offset:pair_end]
+            total_pairs_tried += merge_counts[b]
 
-            if len(merged_scores_b) > 0:
-                max_merged_score, best_pair_local = merged_scores_b.max(0)
-                if max_merged_score.item() > scores_b[base_best_idx].item():
-                    global_pair_idx = pair_offset + best_pair_local.item()
-                    _, base_traj_idx = merge_info[global_pair_idx]
-                    ties_accuracies[_idx] = correct[b][base_traj_idx].item()
-                    total_merge_accepted += 1
-                    total_merge_gain += max_merged_score.item() - scores_b[base_best_idx].item()
-                else:
-                    ties_accuracies[_idx] = base_correct
-            else:
-                ties_accuracies[_idx] = base_correct
-
-            pair_offset += pairs_per_example
+            ties_correct, accepted, score_gain = choose_ties_correctness(
+                base_correct=base_correct,
+                best_original_score=scores_b[base_best_idx].item(),
+                merged_scores=merged_scores_b,
+                acceptance_margin=acceptance_margin,
+            )
+            ties_accuracies[_idx] = ties_correct
+            if accepted:
+                if merge_info:
+                    _, base_traj_idx = merge_info[pair_offset + merged_scores_b.argmax().item()]
+                    assert base_traj_idx == base_best_idx
+                total_merge_accepted += 1
+                total_merge_gain += score_gain
 
         del output, inputs, latent_thoughts
         torch.cuda.empty_cache()
@@ -353,6 +438,17 @@ def main(
         ties_accuracies = {idx: v for d in ties_accuracies for idx, v in d.items()}
         all_corrects = accelerator.gather_for_metrics([all_corrects], use_gather_object=True)
         all_corrects = {idx: v for d in all_corrects for idx, v in d.items()}
+        merge_stats = accelerator.gather_for_metrics(
+            [{
+                "accepted": total_merge_accepted,
+                "pairs_tried": total_pairs_tried,
+                "gain": total_merge_gain,
+            }],
+            use_gather_object=True,
+        )
+        total_merge_accepted = sum(s["accepted"] for s in merge_stats)
+        total_pairs_tried = sum(s["pairs_tried"] for s in merge_stats)
+        total_merge_gain = sum(s["gain"] for s in merge_stats)
         timing_stats = accelerator.gather_for_metrics([timing_stats], use_gather_object=True)
     else:
         timing_stats = [timing_stats]
@@ -370,7 +466,11 @@ def main(
               f" ({total_merge_accepted}/{total_pairs_tried})")
         if total_merge_accepted > 0:
             print(f"Avg Score Gain (accepted):  {total_merge_gain / total_merge_accepted:.6f}")
-        print(f"Merge Mode: {merge_mode}, top_k_ratio={top_k_ratio}, use_task_vectors={use_task_vectors}")
+        print(
+            "Merge Mode: "
+            f"{merge_mode}, top_k_ratio={top_k_ratio}, use_task_vectors={use_task_vectors}, "
+            f"acceptance_margin={acceptance_margin}"
+        )
 
         wall = max(s["wall_time_sec"] for s in timing_stats)
         gen = max(s["generation_time_sec"] for s in timing_stats)
